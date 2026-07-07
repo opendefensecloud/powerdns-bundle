@@ -1,0 +1,109 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clusterzones.dns.cav.enablers.ob
+  annotations:
+    dns.cav.enablers.ob/spec-version: "v1alpha2"
+spec:
+  group: dns.cav.enablers.ob
+  names:
+    kind: ClusterZone
+    listKind: ClusterZoneList
+    plural: clusterzones
+    singular: clusterzone
+  scope: Cluster
+  versions:
+    - name: v1alpha2
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Kind
+          type: string
+          jsonPath: .spec.kind
+        - name: Nameservers
+          type: string
+          jsonPath: .spec.nameservers[0]
+        - name: Sync
+          type: string
+          jsonPath: .status.syncStatus
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - kind
+                - nameservers
+              properties:
+                kind:
+                  type: string
+                  enum: [Native, Master, Slave]
+                nameservers:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                catalog:
+                  type: string
+                account:
+                  type: string
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                id:
+                  type: string
+                name:
+                  type: string
+                kind:
+                  type: string
+                serial:
+                  type: integer
+                  format: int32
+                notified_serial:
+                  type: integer
+                  format: int32
+                edited_serial:
+                  type: integer
+                  format: int32
+                masters:
+                  type: array
+                  items:
+                    type: string
+                dnssec:
+                  type: boolean
+                catalog:
+                  type: string
+                syncStatus:
+                  type: string
+                  enum: [Active, Pending, Error, Failed, Succeeded]
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+      subresources:
+        status: {}

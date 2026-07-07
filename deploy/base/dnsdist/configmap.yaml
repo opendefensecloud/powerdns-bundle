@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dnsdist-config
+  namespace: dns
+data:
+  dnsdist.conf: |
+    -- Bind on all interfaces. dnsdist binds UDP and TCP for addLocal().
+    addLocal("0.0.0.0:53")
+
+    -- Backend pools
+    -- All recursive queries (RD=1) go to the Recursor.
+    -- In practice virtually all client queries set RD=1; the actual
+    -- local vs. upstream routing decision is made by the Recursor via
+    -- forward-zones, not here.
+    local recursor = os.getenv("PDNS_RECURSOR_SERVICE_HOST")
+    if recursor == nil then
+      error("PDNS_RECURSOR_SERVICE_HOST is not set")
+    end
+    newServer({address=recursor .. ":53", pool="recursor", name="pdns-recursor"})
+
+    -- Non-recursive queries (RD=0) go directly to the Authoritative Server.
+    -- This is an edge-case path; normal clients never set RD=0.
+    local auth = os.getenv("PDNS_AUTH_SERVICE_HOST")
+    if auth == nil then
+      error("PDNS_AUTH_SERVICE_HOST is not set")
+    end
+    newServer({address=auth .. ":53", pool="auth", name="pdns-auth"})
+
+    -- Abuse mitigation and backend protection
+    -- (evaluated top-to-bottom; first match wins, before the routing rules).
+    --
+    -- 1. Global query-rate safety valve: shed traffic exceeding a coarse ceiling to
+    --    protect the Recursor/Auth backends from overload. MaxQPSRule matches the
+    --    traffic *within* the limit, so it is wrapped in NotRule to drop the excess.
+    --    This is a blunt aggregate control, not a per-client limit (see 2). Tune
+    --    DNSDIST_MAX_QPS to the backend capacity, or set it to 0 to disable the cap.
+    local maxQPS = tonumber(os.getenv("DNSDIST_MAX_QPS")) or 1000
+    if maxQPS > 0 then
+      addAction(NotRule(MaxQPSRule(maxQPS)), DropAction())
+    end
+
+    -- 2. Per-client rate limit (defense-in-depth, opt-in). Drops traffic from a
+    --    single client IP exceeding the limit. Effective ONLY when dnsdist sees the
+    --    real client source address, i.e. when the client IP is preserved at the
+    --    LoadBalancer (Service externalTrafficPolicy: Local, or an IP-preserving NLB).
+    --    Under the default SNAT behaviour all clients share one source address, so
+    --    enabling this by default would throttle every client collectively; it is
+    --    therefore left disabled. Set DNSDIST_MAX_QPS_PER_CLIENT > 0 once client-IP
+    --    preservation is in place.
+    local maxQPSPerClient = tonumber(os.getenv("DNSDIST_MAX_QPS_PER_CLIENT")) or 0
+    if maxQPSPerClient > 0 then
+      addAction(MaxQPSIPRule(maxQPSPerClient), DropAction())
+    end
+
+    -- 3. Anti-amplification: answer UDP ANY queries with a truncated (TC=1) response
+    --    so legitimate clients retry over TCP, while spoofed-source UDP reflection
+    --    attempts receive only a small truncated reply. The TCPRule(false) guard
+    --    avoids truncating clients that already used TCP. Independent of source IP.
+    addAction(AndRule({QTypeRule(DNSQType.ANY), TCPRule(false)}), TCAction())
+
+    -- Routing rules (evaluated after the controls above; first match wins)
+    addAction(RDRule(), PoolAction("recursor"))
+    addAction(AllRule(), PoolAction("auth"))

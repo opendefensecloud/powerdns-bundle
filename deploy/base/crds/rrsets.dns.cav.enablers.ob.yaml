@@ -1,0 +1,114 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rrsets.dns.cav.enablers.ob
+  annotations:
+    dns.cav.enablers.ob/spec-version: "v1alpha2"
+spec:
+  group: dns.cav.enablers.ob
+  names:
+    kind: RRset
+    listKind: RRsetList
+    plural: rrsets
+    singular: rrset
+  scope: Namespaced
+  versions:
+    - name: v1alpha2
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Type
+          type: string
+          jsonPath: .spec.type
+        - name: TTL
+          type: integer
+          jsonPath: .spec.ttl
+        - name: Zone
+          type: string
+          jsonPath: .spec.zoneRef.name
+        - name: Sync
+          type: string
+          jsonPath: .status.syncStatus
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - type
+                - name
+                - ttl
+                - records
+                - zoneRef
+              properties:
+                type:
+                  type: string
+                  enum: [A, AAAA, CNAME, MX, TXT, NS, SRV, CAA, PTR]
+                name:
+                  type: string
+                  x-kubernetes-validations:
+                    - message: Value is immutable
+                      rule: self == oldSelf
+                ttl:
+                  type: integer
+                  minimum: 1
+                  format: int32
+                records:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                comment:
+                  type: string
+                zoneRef:
+                  type: object
+                  required:
+                    - name
+                    - kind
+                  properties:
+                    name:
+                      type: string
+                    kind:
+                      type: string
+                      enum: [Zone, ClusterZone]
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                dnsEntryName:
+                  type: string
+                lastUpdateTime:
+                  type: string
+                  format: date-time
+                syncStatus:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+      subresources:
+        status: {}

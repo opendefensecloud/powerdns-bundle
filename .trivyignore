@@ -1,0 +1,14 @@
+# Trivy ignore list — configuration/misconfiguration scan only.
+#
+# The image CVE allowlist lives in `.trivyignore.yaml` (structured format with
+# machine-enforced `expired-at` expiry). This plain-text file is referenced by
+# the configuration security scan and records reviewed misconfiguration check
+# IDs that should be suppressed so the scan can still flag *new* findings.
+#
+# Format (one ID per line):
+#   AVD-KSV-0000                        # misconfiguration check ID (justify it)
+#
+# Guidelines:
+#   - Justify every entry and keep the list as small as possible.
+#
+# No entries yet — every misconfiguration finding is currently reported.

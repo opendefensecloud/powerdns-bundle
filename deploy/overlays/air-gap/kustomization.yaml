@@ -1,0 +1,48 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Air-gap overlay — substitutes all upstream image references with a private registry.
+#
+# The image set is derived from the OCM component descriptor, so every bundled
+# image is listed here. Garage and its bootstrap helper (alpine) are only
+# instantiated in multi-instance mode via the KRO ResourceGraphDefinition, so
+# their entries are no-ops against this single-instance base — they are listed
+# for completeness so this overlay's image set matches the descriptor.
+#
+# Before deploying, configure the registry by running:
+#   ./hack/localize-images.sh --registry <your-registry-host>[/<prefix>]
+#
+# That command regenerates this file AND rewrites the multi-instance KRO
+# ResourceGraphDefinition (deploy/kro/powerdns-instance-rgd.yaml) in place, so
+# both deploy paths point at your registry. Alternatively, edit the newName
+# fields below manually (this does not cover the KRO path).
+#
+# Only the registry/name is rewritten; the base manifests' pinned tag and digest
+# (repo:tag@sha256:...) are preserved by kustomize, so the air-gap deployment stays
+# pinned to the same immutable images. Mirror them digest-preserving (for example
+# with `ocm transfer` or `crane copy`).
+#
+# Deploy:
+#   kubectl apply -k deploy/overlays/air-gap/
+#
+# Default placeholder: registry.local — replace with your actual private registry.
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+images:
+  - name: alpine
+    newName: registry.local/alpine
+  - name: dxflrs/garage
+    newName: registry.local/dxflrs/garage
+  - name: ghcr.io/telekom/powerdns-operator
+    newName: registry.local/telekom/powerdns-operator
+  - name: powerdns/dnsdist-19
+    newName: registry.local/powerdns/dnsdist-19
+  - name: powerdns/lightningstream
+    newName: registry.local/powerdns/lightningstream
+  - name: powerdns/pdns-auth-49
+    newName: registry.local/powerdns/pdns-auth-49
+  - name: powerdns/pdns-recursor-52
+    newName: registry.local/powerdns/pdns-recursor-52

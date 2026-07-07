@@ -1,0 +1,47 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pdns-recursor
+  namespace: dns
+  labels:
+    app.kubernetes.io/part-of: powerdns
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pdns-recursor
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pdns-authoritative
+  namespace: dns
+  labels:
+    app.kubernetes.io/part-of: powerdns
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dns-authoritative
+  endpoints:
+    - port: api
+      path: /metrics
+      interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pdns-operator
+  namespace: dns
+  labels:
+    app.kubernetes.io/part-of: powerdns
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pdns-operator
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

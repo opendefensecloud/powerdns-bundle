@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -euo pipefail
+#
+# localize-images.sh — point every bundled container image at a private registry
+# for air-gap deployment.
+#
+# Usage:
+#   ./hack/localize-images.sh --registry <registry-host>[/<prefix>]
+#
+# Example:
+#   ./hack/localize-images.sh --registry harbor.example.com/powerdns-ocm
+#
+# The image set is derived from the OCM component descriptor (via
+# hack/list-ocm-images.sh), so every bundled image is covered automatically —
+# the single-instance DNS images, the operator, and the multi-instance images
+# (Garage and its bootstrap helper). This script rewrites BOTH deploy paths:
+#
+#   1. deploy/overlays/air-gap/kustomization.yaml — the Kustomize images
+#      transformer for the single-instance base deployment
+#      (kubectl apply -k deploy/overlays/air-gap/).
+#   2. deploy/kro/powerdns-instance-rgd.yaml — the multi-instance KRO
+#      ResourceGraphDefinition, whose image references are literal strings the
+#      Kustomize transformer cannot reach. These are rewritten in place,
+#      anchored on the immutable @sha256 digest, which makes the rewrite
+#      index-independent and idempotent (re-running, or running with a
+#      different registry, always converges to the chosen registry).
+#
+# Only the registry/host segment is rewritten; the pinned tag and digest
+# (repo:tag@sha256:...) are preserved, so the air-gap deployment stays pinned to
+# the same immutable images. Mirror them digest-preserving first, e.g. via
+# `ocm transfer` or `crane copy`.
+#
+# After running this script, deploy with:
+#   kubectl apply -k deploy/overlays/air-gap/            # single-instance
+#   kubectl apply -f deploy/kro/powerdns-instance-rgd.yaml  # multi-instance (+ KRO controller)
+
+REGISTRY=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --registry)
+      REGISTRY="${2%/}"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: $0 --registry <registry-host>[/<prefix>]"
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument '$1'" >&2
+      echo "Usage: $0 --registry <registry-host>[/<prefix>]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$REGISTRY" ]]; then
+  echo "Error: --registry is required." >&2
+  echo "Usage: $0 --registry <registry-host>[/<prefix>]" >&2
+  exit 1
+fi
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DESCRIPTOR="${REPO_ROOT}/ocm/component-descriptor.yaml"
+OVERLAY_DIR="${REPO_ROOT}/deploy/overlays/air-gap"
+RGD="${REPO_ROOT}/deploy/kro/powerdns-instance-rgd.yaml"
+
+mapfile -t IMAGES < <(bash "${REPO_ROOT}/hack/list-ocm-images.sh" "$DESCRIPTOR")
+if [[ ${#IMAGES[@]} -eq 0 ]]; then
+  echo "Error: no images found in $DESCRIPTOR" >&2
+  exit 1
+fi
+
+# split_ref <full-ref> -> prints "<name>\t<newName>\t<localized>\t<digest>"
+#   name      : repo path without tag/digest, as written (incl. host if any) —
+#               this is what kustomize matches against.
+#   newName   : name with the registry host segment replaced by ${REGISTRY}
+#               (host-like first segment stripped) or ${REGISTRY}/ prefixed.
+#   localized : newName with the original :tag@digest re-appended.
+#   digest    : the sha256:... portion (empty if the ref is not digest-pinned).
+# A first path segment is treated as a registry host iff it contains '.' or ':'
+# (standard Docker reference grammar), e.g. ghcr.io/... ; otherwise the ref is a
+# Docker Hub short name (powerdns/..., dxflrs/garage, alpine) and is prefixed.
+split_ref() {
+  local ref="$1"
+  local without_digest digest name tag first rest newName localized
+
+  if [[ "$ref" == *"@"* ]]; then
+    without_digest="${ref%@*}"
+    digest="${ref#*@}"
+  else
+    without_digest="$ref"
+    digest=""
+  fi
+
+  # Strip the tag only if the segment after the last ':' is not a path (i.e. not
+  # a host:port that precedes a '/').
+  if [[ "$without_digest" == *:* && "${without_digest##*:}" != *"/"* ]]; then
+    name="${without_digest%:*}"
+    tag="${without_digest##*:}"
+  else
+    name="$without_digest"
+    tag=""
+  fi
+
+  first="${name%%/*}"
+  if [[ "$name" == *"/"* && ( "$first" == *.* || "$first" == *:* ) ]]; then
+    rest="${name#*/}"
+    newName="${REGISTRY}/${rest}"
+  else
+    newName="${REGISTRY}/${name}"
+  fi
+
+  localized="$newName"
+  [[ -n "$tag" ]] && localized="${localized}:${tag}"
+  [[ -n "$digest" ]] && localized="${localized}@${digest}"
+
+  printf '%s\t%s\t%s\t%s\n' "$name" "$newName" "$localized" "$digest"
+}
+
+OVERLAY_IMAGES="$(mktemp)"
+DIGEST_MAP="$(mktemp)"
+trap 'rm -f "$OVERLAY_IMAGES" "$DIGEST_MAP"' EXIT
+
+for ref in "${IMAGES[@]}"; do
+  IFS=$'\t' read -r name newName localized digest < <(split_ref "$ref")
+  printf '  - name: %s\n    newName: %s\n' "$name" "$newName" >> "$OVERLAY_IMAGES"
+  if [[ -n "$digest" ]]; then
+    printf '%s\t%s\n' "$digest" "$localized" >> "$DIGEST_MAP"
+  fi
+done
+
+# 1) Regenerate the Kustomize air-gap overlay.
+mkdir -p "$OVERLAY_DIR"
+{
+  cat << EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Air-gap overlay — generated by hack/localize-images.sh
+# Registry: ${REGISTRY}
+# Regenerate: ./hack/localize-images.sh --registry ${REGISTRY}
+#
+# Deploy: kubectl apply -k deploy/overlays/air-gap/
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+images:
+EOF
+  cat "$OVERLAY_IMAGES"
+} > "${OVERLAY_DIR}/kustomization.yaml"
+
+# 2) Rewrite the KRO ResourceGraphDefinition in place, anchored on the digest.
+TMP_RGD="$(mktemp)"
+awk -v mapfile="$DIGEST_MAP" '
+  BEGIN {
+    while ((getline line < mapfile) > 0) {
+      i = index(line, "\t")
+      if (i > 0) loc[substr(line, 1, i - 1)] = substr(line, i + 1)
+    }
+  }
+  /^[[:space:]]*image:[[:space:]]*.*@sha256:/ {
+    match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
+    d = $0; sub(/^.*@/, "", d); sub(/[[:space:]].*$/, "", d)
+    if (d in loc) { print indent "image: " loc[d]; next }
+  }
+  { print }
+' "$RGD" > "$TMP_RGD"
+mv "$TMP_RGD" "$RGD"
+
+echo "Localized ${#IMAGES[@]} image(s) to registry: ${REGISTRY}"
+echo "Written: ${OVERLAY_DIR}/kustomization.yaml"
+echo "Updated: ${RGD}"
+echo "Deploy:  kubectl apply -k deploy/overlays/air-gap/        # single-instance"
+echo "         kubectl apply -f deploy/kro/powerdns-instance-rgd.yaml  # multi-instance"

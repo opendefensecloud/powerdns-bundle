@@ -1,0 +1,15 @@
+# Baseline deny-all for the workload namespace. Every pod starts with no allowed
+# ingress or egress; the per-workload policies below re-open exactly the flows each
+# component needs. On clusters without a NetworkPolicy-enforcing CNI this is a no-op.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: dns
+  labels:
+    app.kubernetes.io/part-of: powerdns-ocm
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

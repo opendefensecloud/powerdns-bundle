@@ -1,0 +1,177 @@
+name: "Cluster authentication"
+description: >-
+  Selects a cluster authentication strategy (disabled, kubeconfig secret, or
+  EKS OIDC), configures access, installs kubectl, and verifies connectivity.
+  Exposes an `enabled` output so callers can gate subsequent deployment steps.
+  The calling job must run actions/checkout before this action and, for the
+  eks-oidc mode, declare `permissions: id-token: write`.
+
+inputs:
+  auth-mode:
+    description: "Authentication mode: disabled, kubeconfig, or eks-oidc."
+    required: false
+    default: "kubeconfig"
+  allow-pr-deploy:
+    description: "Allow EKS OIDC deployment on pull_request events when 'true'."
+    required: false
+    default: "false"
+  kubeconfig:
+    description: "Kubeconfig file contents (kubeconfig mode). Pass secrets.KUBECONFIG."
+    required: false
+    default: ""
+  aws-region:
+    description: "AWS region of the EKS cluster (eks-oidc mode)."
+    required: false
+    default: ""
+  eks-cluster-name:
+    description: "EKS cluster name (eks-oidc mode)."
+    required: false
+    default: ""
+  aws-role-to-assume:
+    description: "IAM role ARN to assume via GitHub OIDC (eks-oidc mode)."
+    required: false
+    default: ""
+  kubectl-version:
+    description: "kubectl version to install (without the leading 'v')."
+    required: true
+  summary-title:
+    description: "Heading used in the job summary when authentication is skipped."
+    required: true
+
+outputs:
+  enabled:
+    description: "'true' when cluster access is configured and deployment should proceed."
+    value: ${{ steps.select.outputs.enabled }}
+  auth_mode:
+    description: "The resolved (lower-cased) authentication mode."
+    value: ${{ steps.select.outputs.auth_mode }}
+
+runs:
+  using: "composite"
+  steps:
+    # Select the cluster authentication strategy once; deployment remains plain kubectl afterwards.
+    - name: Select cluster authentication strategy
+      id: select
+      shell: bash
+      env:
+        AUTH_MODE: ${{ inputs.auth-mode }}
+        ALLOW_PR_DEPLOY: ${{ inputs.allow-pr-deploy }}
+        KUBECONFIG_CONTENT: ${{ inputs.kubeconfig }}
+        AWS_REGION: ${{ inputs.aws-region }}
+        EKS_CLUSTER_NAME: ${{ inputs.eks-cluster-name }}
+        AWS_ROLE_TO_ASSUME: ${{ inputs.aws-role-to-assume }}
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+      run: |
+        set -euo pipefail
+
+        mode="$(printf '%s' "${AUTH_MODE:-kubeconfig}" | tr '[:upper:]' '[:lower:]')"
+        echo "auth_mode=${mode}" >> "$GITHUB_OUTPUT"
+
+        if [ -z "$mode" ] || [ "$mode" = "disabled" ]; then
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### ${SUMMARY_TITLE}"
+            echo "Skipped: cluster authentication is disabled."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        if [ "$mode" = "kubeconfig" ]; then
+          if [ -z "${KUBECONFIG_CONTENT}" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ${SUMMARY_TITLE}"
+              echo "Skipped: no KUBECONFIG secret is configured for this repository."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ "$mode" = "eks-oidc" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$ALLOW_PR_DEPLOY" != "true" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ${SUMMARY_TITLE}"
+              echo "Skipped: EKS OIDC deployment is disabled for pull request events."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          missing=()
+          [ -n "${AWS_REGION}" ] || missing+=("AWS_REGION")
+          [ -n "${EKS_CLUSTER_NAME}" ] || missing+=("EKS_CLUSTER_NAME")
+          [ -n "${AWS_ROLE_TO_ASSUME}" ] || missing+=("AWS_ROLE_TO_ASSUME")
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '::error::Missing repository variable(s): %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        printf '::error::Unsupported KUBE_AUTH_MODE: %s\n' "$mode"
+        exit 1
+
+    # Legacy mode: write the repository-provided kubeconfig exactly as kubectl expects it.
+    - name: Configure kubeconfig from secret
+      if: ${{ steps.select.outputs.enabled == 'true' && steps.select.outputs.auth_mode == 'kubeconfig' }}
+      shell: bash
+      env:
+        KUBECONFIG_CONTENT: ${{ inputs.kubeconfig }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p "$HOME/.kube"
+        printf '%s' "$KUBECONFIG_CONTENT" > "$HOME/.kube/config"
+        chmod 600 "$HOME/.kube/config"
+
+    # EKS mode: exchange the GitHub OIDC token for AWS credentials, then generate kubeconfig.
+    - name: Configure AWS credentials
+      if: ${{ steps.select.outputs.enabled == 'true' && steps.select.outputs.auth_mode == 'eks-oidc' }}
+      uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c  # v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-to-assume }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Configure kubeconfig for EKS
+      if: ${{ steps.select.outputs.enabled == 'true' && steps.select.outputs.auth_mode == 'eks-oidc' }}
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        EKS_CLUSTER_NAME: ${{ inputs.eks-cluster-name }}
+      run: |
+        set -euo pipefail
+
+        aws eks update-kubeconfig \
+          --region "$AWS_REGION" \
+          --name "$EKS_CLUSTER_NAME"
+
+    # Common path: from here on the workflow is cloud-agnostic and only uses kubectl.
+    - name: Install kubectl
+      if: ${{ steps.select.outputs.enabled == 'true' }}
+      shell: bash
+      env:
+        KUBECTL_VERSION: ${{ inputs.kubectl-version }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${KUBECTL_VERSION}" ]; then
+          echo "::error::kubectl-version input is required"
+          exit 1
+        fi
+
+        curl -sSfL "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /tmp/kubectl
+        sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+        kubectl version --client=true
+
+    - name: Verify cluster access
+      if: ${{ steps.select.outputs.enabled == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        kubectl cluster-info

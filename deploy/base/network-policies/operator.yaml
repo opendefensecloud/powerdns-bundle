@@ -1,0 +1,49 @@
+# Operator: a controller that reconciles PowerDNS zones. It exposes metrics on
+# 8080 (scraped from the monitoring namespace), calls the authoritative API on
+# 8081, and talks to the kube-apiserver.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: operator
+  namespace: dns
+  labels:
+    app.kubernetes.io/part-of: powerdns-ocm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pdns-operator
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Prometheus metrics scrape from any namespace labelled as monitoring. The
+    # 8081 health port is probed by the kubelet, which is exempt from policy.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network-policy/monitoring: "true"
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # PowerDNS Authoritative API.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pdns-auth
+      ports:
+        - protocol: TCP
+          port: 8081
+    # kube-apiserver (controller reconcile and leader election). The API server
+    # is not a selectable pod and its endpoint IP varies by platform, so egress
+    # is restricted by port rather than destination IP to stay cloud-agnostic.
+    # 443 covers managed control planes (e.g. EKS); 6443 covers kubeadm-style
+    # clusters where the apiserver endpoint listens on 6443 post-DNAT.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443

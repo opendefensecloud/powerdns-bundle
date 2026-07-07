@@ -1,0 +1,70 @@
+# OCM Localization Config — image reference substitution for air-gap deployments
+#
+# When the OCM package is transported to a private registry, deployers must replace
+# the original upstream image references in the Kubernetes manifests with the
+# relocated addresses from the OCM component.
+#
+# This config is consumed by OCM-aware deployers (e.g. the OCM Flux plugin or the
+# OCM Add-on Manager).  Manual deployments can use `ocm transfer` + patch overlays.
+#
+# Resource names must match those declared in component-descriptor.yaml.
+
+apiVersion: config.ocm.software/v1alpha1
+kind: LocalizationConfig
+metadata:
+  name: powerdns-ocm-localization
+
+spec:
+  localizations:
+
+    - name: dnsdist-image
+      resource:
+        name: dnsdist
+      file:
+        path: base/dnsdist/deployment.yaml
+        value: spec.template.spec.containers[0].image
+
+    - name: pdns-recursor-image
+      resource:
+        name: pdns-recursor
+      file:
+        path: base/recursor/deployment.yaml
+        value: spec.template.spec.containers[0].image
+
+    - name: pdns-auth-image
+      resource:
+        name: pdns-authoritative
+      file:
+        path: base/authoritative/deployment.yaml
+        value: spec.template.spec.containers[0].image
+
+    - name: lightningstream-image
+      resource:
+        name: lightningstream
+      file:
+        path: base/authoritative/deployment.yaml
+        value: spec.template.spec.containers[1].image
+
+    # The Authoritative pod also runs lightningstream as an init container
+    # (repair-lmdb-permissions); localize it too so no init container pulls
+    # from an upstream registry.
+    - name: lightningstream-initcontainer-image
+      resource:
+        name: lightningstream
+      file:
+        path: base/authoritative/deployment.yaml
+        value: spec.template.spec.initContainers[0].image
+
+    - name: pdns-operator-image
+      resource:
+        name: pdns-operator
+      file:
+        path: base/operator/deployment.yaml
+        value: spec.template.spec.containers[0].image
+
+    # Garage and its bootstrap helper (garage-bootstrap / alpine) are only
+    # instantiated in multi-instance mode (ADR-006) and exist exclusively in the
+    # KRO ResourceGraphDefinition (deploy/kro/powerdns-instance-rgd.yaml), not in
+    # base/**. Their image references are literal strings the OCM file-path
+    # localization below cannot address, so they are localized by
+    # hack/localize-images.sh (digest-anchored, in place) rather than here.

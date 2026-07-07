@@ -1,0 +1,128 @@
+# CI verification Prometheus. Runs in a dedicated `monitoring` namespace
+# (separate from the `dns` workload namespace) so that the workload NetworkPolicies
+# can grant metrics-scrape ingress to an isolated monitoring namespace by label,
+# instead of opening the workload namespace to itself. This mirrors a realistic
+# production topology where monitoring lives in its own namespace.
+#
+# The scrape source is selected by the namespace label `network-policy/monitoring: "true"`.
+# Any production monitoring namespace that should scrape PowerDNS metrics must carry
+# the same label.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/name: powerdns-monitoring
+    app.kubernetes.io/part-of: powerdns-ocm
+    # Identifies this namespace as an allowed metrics-scrape source for the
+    # PowerDNS workload NetworkPolicies.
+    network-policy/monitoring: "true"
+    # Pod Security Standards: Prometheus runs as non-root; Baseline mirrors the
+    # workload namespace and avoids tripping the operator-managed pod on Restricted.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: powerdns-prometheus
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: powerdns-prometheus
+    app.kubernetes.io/part-of: powerdns-ocm
+---
+# Target-discovery permissions are granted in the `dns` workload namespace and
+# bound to the Prometheus ServiceAccount that lives in `monitoring`. A RoleBinding
+# may reference a ServiceAccount from another namespace, which keeps the grant
+# scoped to the single namespace Prometheus actually scrapes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: powerdns-prometheus
+  namespace: dns
+rules:
+  - apiGroups: [""]
+    resources:
+      - endpoints
+      - pods
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: powerdns-prometheus
+  namespace: dns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: powerdns-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: powerdns-prometheus
+    namespace: monitoring
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: powerdns-prometheus
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: powerdns-prometheus
+    app.kubernetes.io/part-of: powerdns-ocm
+spec:
+  selector:
+    prometheus: powerdns-ci
+  ports:
+    - name: web
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Prometheus
+metadata:
+  name: powerdns-ci
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: powerdns-prometheus
+    app.kubernetes.io/part-of: powerdns-ocm
+spec:
+  replicas: 1
+  serviceAccountName: powerdns-prometheus
+  serviceMonitorSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: powerdns
+  # The ServiceMonitors live in the `dns` workload namespace; allow this
+  # Prometheus to discover them across the namespace boundary.
+  serviceMonitorNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: dns
+  evaluationInterval: 15s
+  retention: 2h
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    fsGroup: 65534

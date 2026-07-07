@@ -1,0 +1,59 @@
+# PowerDNSInstance — Multi-instance scenario
+#
+# Deploys two fully independent DNS stacks in separate namespaces:
+#   dns-a  (namespace: dns-a, multiInstance: true, Garage S3 enabled)
+#   dns-b  (namespace: dns-b, multiInstance: true, Garage S3 enabled)
+#
+# Each instance has its own:
+#   - Namespace (dns-a / dns-b)
+#   - Garage S3 store for Lightning Stream replication
+#   - RBAC (ClusterRole/Binding names qualified with the namespace)
+#   - API key Secret, ConfigMaps, PVC, Deployments, Services
+#
+# Prerequisites:
+#   kubectl apply -f deploy/kro/powerdns-instance-rgd.yaml
+#
+# Apply:
+#   kubectl apply -f deploy/kro/powerdns-multi-instance-example.yaml
+#
+# Verify both instances are running:
+#   kubectl get powerdnsinstance
+#   kubectl -n dns-a get pods
+#   kubectl -n dns-b get pods
+#
+# Garage initialisation:
+#   The generated Garage pod bootstraps its single-node layout, S3 key, and
+#   Lightning Stream bucket automatically for validation.
+#
+# Isolation validation:
+#   RUN_MULTI_INSTANCE=true ./hack/validate-cluster.sh
+#   # or run the focused validation directly:
+#   ./hack/validate-multi-instance.sh --cleanup
+#
+# Independent lifecycle validation:
+#   # Delete instance A — instance B must keep running.
+#   kubectl delete powerdnsinstance dns-a
+#   kubectl -n dns-b get pods
+#   # Expected: All dns-b pods still running.
+
+---
+apiVersion: kro.run/v1alpha1
+kind: PowerDNSInstance
+metadata:
+  name: dns-a
+  namespace: default
+spec:
+  namespace: dns-a
+  pdnsApiKey: changeme-a
+  multiInstance: true
+
+---
+apiVersion: kro.run/v1alpha1
+kind: PowerDNSInstance
+metadata:
+  name: dns-b
+  namespace: default
+spec:
+  namespace: dns-b
+  pdnsApiKey: changeme-b
+  multiInstance: true

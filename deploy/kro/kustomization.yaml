@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# KRO ResourceGraphDefinition for the PowerDNS DNS instance.
+# Apply this before creating PowerDNSInstance objects.
+#
+# Usage:
+#   kubectl apply -k deploy/kro/
+resources:
+  - powerdns-instance-rgd.yaml

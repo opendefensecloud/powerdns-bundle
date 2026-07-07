@@ -1,0 +1,12 @@
+title = "PowerDNS bundle Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Pinned GitHub Actions revisions are not Sourcegraph tokens"
+targetRules = ["sourcegraph-access-token"]
+regexTarget = "line"
+regexes = [
+  '''^\s*-?\s*uses:\s+[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+@[0-9a-f]{40}(?:\s+#.*)?$''',
+]

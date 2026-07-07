@@ -1,0 +1,23 @@
+# Reference scenario: Zone and ClusterZone creation.
+# Apply with: kubectl apply -f deploy/examples/zone-reference-scenario.yaml
+# Requires namespace "dns" to exist: kubectl apply -f deploy/namespace.yaml
+---
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: Zone
+metadata:
+  name: intern.example.com
+  namespace: dns
+spec:
+  kind: Native
+  nameservers:
+    - ns1.intern.example.com
+    - ns2.intern.example.com
+---
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: ClusterZone
+metadata:
+  name: cluster.example.com
+spec:
+  kind: Native
+  nameservers:
+    - ns1.cluster.example.com

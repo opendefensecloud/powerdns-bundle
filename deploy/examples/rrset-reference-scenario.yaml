@@ -1,0 +1,102 @@
+# Reference scenario: RRset creation covering all base record types.
+# Depends on zone-reference-scenario.yaml being applied first.
+# Apply with: kubectl apply -f deploy/examples/rrset-reference-scenario.yaml
+---
+# A record — single value
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: RRset
+metadata:
+  name: app.intern.example.com
+  namespace: dns
+spec:
+  name: app.intern.example.com.
+  type: A
+  ttl: 300
+  records:
+    - "10.0.5.12"
+  zoneRef:
+    name: intern.example.com
+    kind: Zone
+---
+# A record — round-robin
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: RRset
+metadata:
+  name: lb.intern.example.com
+  namespace: dns
+spec:
+  name: lb.intern.example.com.
+  type: A
+  ttl: 60
+  records:
+    - "10.0.5.10"
+    - "10.0.5.11"
+    - "10.0.5.12"
+  zoneRef:
+    name: intern.example.com
+    kind: Zone
+---
+# AAAA record
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: RRset
+metadata:
+  name: ipv6.intern.example.com
+  namespace: dns
+spec:
+  name: ipv6.intern.example.com.
+  type: AAAA
+  ttl: 300
+  records:
+    - "2001:db8::1"
+  zoneRef:
+    name: intern.example.com
+    kind: Zone
+---
+# CNAME record
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: RRset
+metadata:
+  name: www.intern.example.com
+  namespace: dns
+spec:
+  name: www.intern.example.com.
+  type: CNAME
+  ttl: 300
+  records:
+    - "app.intern.example.com."
+  zoneRef:
+    name: intern.example.com
+    kind: Zone
+---
+# MX record
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: RRset
+metadata:
+  name: intern.example.com
+  namespace: dns
+spec:
+  name: intern.example.com.
+  type: MX
+  ttl: 3600
+  records:
+    - "10 mail.intern.example.com."
+    - "20 mail2.intern.example.com."
+  zoneRef:
+    name: intern.example.com
+    kind: Zone
+---
+# TXT record
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: RRset
+metadata:
+  name: spf.intern.example.com
+  namespace: dns
+spec:
+  name: spf.intern.example.com.
+  type: TXT
+  ttl: 3600
+  records:
+    - '"v=spf1 mx -all"'
+  zoneRef:
+    name: intern.example.com
+    kind: Zone
