@@ -13,6 +13,29 @@ This document describes how to install and operate the PowerDNS OCM solution in 
 
 The OCM CLI is available at <https://ocm.software/docs/getting-started/>.
 
+## Two independent localization mechanisms
+
+Image-reference "localization" (rewriting a registry address to a private one) is handled by
+**two separate, independent mechanisms** in this repository. They are not layered on top of each
+other and neither depends on the other; which one applies depends on how you deploy:
+
+| Mechanism | File | Consumed by | Covers |
+|---|---|---|---|
+| OCM-native declarative localization | `ocm/localization-config.yaml` | OCM-aware deployers that instantiate the component version directly (e.g. the OCM Flux plugin, the OCM Add-on Manager, `ocm` CLI localization commands) — **not** used by the `kubectl`/`kustomize` procedure below | Plain, YAML-path addressable image references inside `deploy/base/**/*.yaml` |
+| Script-based localization (this guide) | `hack/localize-images.sh` | Anyone deploying with plain `kubectl apply -k` (Steps 1–5 below) | Every bundled image, including the multi-instance KRO `ResourceGraphDefinition` (`deploy/kro/powerdns-instance-rgd.yaml`), whose image references are literal strings that the declarative OCM mechanism cannot address |
+
+**Important:** `ocm/localization-config.yaml`'s `kind: LocalizationConfig` is a plain **OCM CLI
+configuration object** (part of the Open Component Model specification, `apiVersion:
+config.ocm.software/v1alpha1`). It is **not a Kubernetes object**, is **never applied to a
+cluster** with `kubectl`, and has **no relation** to this project's own Kubernetes CRDs (`Zone`,
+`ClusterZone`, `RRset`, `ClusterRRset` — defined under `deploy/base/crds/` and reconciled by the
+PowerDNS Operator). The shared word "Localization" is coincidental terminology from two unrelated
+domains (OCM image-reference rewriting vs. this project's DNS zone/record custom resources).
+
+This guide documents the **script-based path** (`hack/localize-images.sh`), since it is the one
+required for the plain `kubectl`/`kustomize` deployment procedure below and is the only one of the
+two that also covers the multi-instance KRO manifests.
+
 ## Step 1 — Build the OCM bundle (internet-connected machine)
 
 Run the following on a machine that can reach the upstream container registries:
