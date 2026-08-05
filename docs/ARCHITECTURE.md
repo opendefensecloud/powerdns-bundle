@@ -603,7 +603,23 @@ The namespace model keeps Kubernetes objects, credentials, Services, and persist
 
 Each instance runs its own PowerDNS Operator deployment, configured with a namespace-local `PDNS_API_URL` and the `WATCH_NAMESPACE` environment variable set to the instance namespace. With `WATCH_NAMESPACE` set, the operator's manager cache is restricted to that namespace, so namespaced `Zone` and `RRset` resources from other namespaces are neither watched nor reconciled. As defense in depth, the per-instance operator `ServiceAccount` is granted only a namespaced `Role` for the namespaced CRDs and operational resources (`zones`, `rrsets`, `events`, `leases`); a minimal `ClusterRole` covers the cluster-scoped `ClusterZone` / `ClusterRRset` CRDs that the operator binary always reconciles. End-to-end configuration and runtime isolation is verified by `hack/validate-multi-instance.sh`.
 
-The shipping image (`ghcr.io/telekom/powerdns-operator:sha-b23ee7d`) is built from a fork that adds the `WATCH_NAMESPACE` support. The change is proposed upstream as [powerdns-operator/PowerDNS-Operator#307](https://github.com/powerdns-operator/PowerDNS-Operator/issues/307); once a release containing the patch is published, the deployment will switch to the upstream tag.
+The shipping image (`ghcr.io/telekom/powerdns-operator:sha-b23ee7d`) is built from a fork,
+[`telekom/PowerDNS-Operator`](https://github.com/telekom/PowerDNS-Operator), branch
+[`feat/watch-namespace-env`](https://github.com/telekom/PowerDNS-Operator/tree/feat/watch-namespace-env),
+that adds the `WATCH_NAMESPACE` support on top of the upstream
+[`powerdns-operator/PowerDNS-Operator`](https://github.com/powerdns-operator/PowerDNS-Operator)
+project — it is **not** the plain upstream image, which is why searching the upstream
+`main` branch alone for `WATCH_NAMESPACE` finds no matches. The change is proposed
+upstream as [powerdns-operator/PowerDNS-Operator#307](https://github.com/powerdns-operator/PowerDNS-Operator/issues/307);
+once a release containing the patch is published, the deployment will switch to the
+upstream tag and this fork will be retired.
+
+This capability is independently verifiable without any internal knowledge:
+
+- **Fork/branch**: [`telekom/PowerDNS-Operator@feat/watch-namespace-env`](https://github.com/telekom/PowerDNS-Operator/tree/feat/watch-namespace-env) — inspect the source directly to confirm the manager registers `WATCH_NAMESPACE` and restricts its cache accordingly.
+- **Upstream tracking issue**: [powerdns-operator/PowerDNS-Operator#307](https://github.com/powerdns-operator/PowerDNS-Operator/issues/307).
+- **Deployed configuration**: `deploy/base/operator/deployment.yaml` sets `WATCH_NAMESPACE`; `deploy/base/operator/rbac.yaml` grants the matching namespaced `Role` alongside a minimal cluster-scoped `ClusterRole`.
+- **Runtime proof**: `hack/validate-multi-instance.sh` (see below) provisions two simultaneous instances and asserts cross-namespace isolation with explicit negative RBAC checks (`kubectl auth can-i` denials), in addition to functional zone/record isolation.
 
 Focused validation:
 
