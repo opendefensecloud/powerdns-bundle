@@ -135,7 +135,7 @@ resources:
   # -------------------------------------------------------------------------
 
   - name: deploy-manifests
-    type: directory
+    type: directoryTree
     relation: local
     version: "0.1.0-poc"
     input:
@@ -151,7 +151,7 @@ resources:
   # The RGD (powerdns-instance-rgd.yaml) is the cluster-wide blueprint;
   # example files show single-instance and multi-instance instantiation.
   - name: kro-manifests
-    type: directory
+    type: directoryTree
     relation: local
     version: "0.1.0-poc"
     input:
