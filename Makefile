@@ -26,13 +26,13 @@ ocm-build: $(COMPONENT_DESCRIPTOR)
 
 ocm-bundle: ocm-build
 	rm -rf $(CTF_BUNDLED)
-	$(OCM_BIN) transfer componentarchive --copy-resources $(CTF_FILE) $(CTF_BUNDLED)
+	$(OCM_BIN) transfer commontransportarchive --copy-resources $(CTF_FILE) $(CTF_BUNDLED)
 
 ocm-validate: ocm-build
 	$(OCM_BIN) get componentversion $(CTF_FILE)//$(COMPONENT_NAME):$(COMPONENT_VERSION)
 
 ocm-push: ocm-bundle
-	$(OCM_BIN) transfer componentarchive $(CTF_BUNDLED) oci://$(REGISTRY)
+	$(OCM_BIN) transfer commontransportarchive $(CTF_BUNDLED) oci://$(REGISTRY)
 
 deploy:
 	$(KUBECTL_BIN) apply -k deploy/

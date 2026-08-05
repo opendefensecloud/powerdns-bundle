@@ -47,7 +47,7 @@ make ocm-bundle
 This executes two steps internally:
 
 1. `ocm add componentversions` — builds `ocm/ctf.tar` from the component descriptor with external image references.
-2. `ocm transfer componentarchive --copy-resources` — copies every referenced image as a local blob into `ocm/ctf-bundled.tar`.
+2. `ocm transfer commontransportarchive --copy-resources` — copies every referenced image as a local blob into `ocm/ctf-bundled.tar`.
 
 The resulting `ocm/ctf-bundled.tar` is a self-contained transport archive that embeds every bundled container image — the DNS components (dnsdist, pdns-recursor, pdns-auth, lightningstream), the operator, and the multi-instance images (Garage and its bootstrap helper) — plus the Kubernetes manifests.
 
@@ -67,7 +67,7 @@ On the air-gapped machine (or a machine with access to both the bundle and the p
 OCM_BIN=ocm
 REGISTRY=harbor.example.com/powerdns-ocm    # replace with your registry
 
-${OCM_BIN} transfer componentarchive ocm/ctf-bundled.tar oci://${REGISTRY}
+${OCM_BIN} transfer commontransportarchive ocm/ctf-bundled.tar oci://${REGISTRY}
 ```
 
 This populates the registry with all component images under the specified prefix. Alternatively, use the `make ocm-push` target after setting the `REGISTRY` variable:

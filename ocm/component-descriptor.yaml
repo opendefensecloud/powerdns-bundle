@@ -1,9 +1,9 @@
 # OCM component constructor for the PowerDNS bundle.
 #
 # Build:    make ocm-build
-# Bundle:   ocm transfer componentarchive --copy-resources ocm/ctf.tar ocm/ctf-bundled.tar
+# Bundle:   ocm transfer commontransportarchive --copy-resources ocm/ctf.tar ocm/ctf-bundled.tar
 # Validate: ocm get componentversion ocm/ctf.tar//github.com/bwi/powerdns-ocm:0.1.0-poc
-# Push:     ocm transfer componentarchive ocm/ctf-bundled.tar oci://<registry>
+# Push:     ocm transfer commontransportarchive ocm/ctf-bundled.tar oci://<registry>
 #
 # Versioning strategy (see docs/UPGRADE.md §1):
 #   The component `version` below is the version of the tested bundle and is
