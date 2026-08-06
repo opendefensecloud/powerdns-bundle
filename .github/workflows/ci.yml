@@ -153,7 +153,7 @@ jobs:
 
       - name: YAML lint
         run: |
-          yamllint -d '{extends: default, rules: {line-length: {max: 220}, truthy: {check-keys: false}, document-start: disable, comments-indentation: disable}}' \
+          yamllint -d '{extends: default, rules: {line-length: {max: 220}, truthy: {check-keys: false}, document-start: disable, comments-indentation: disable, indentation: {indent-sequences: whatever}}}' \
             .github/workflows deploy hack/ci ocm
 
       - name: ShellCheck

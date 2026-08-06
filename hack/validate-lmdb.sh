@@ -124,7 +124,7 @@ metadata:
 spec:
   kind: Native
   nameservers:
-    - ns1.example.com.
+    - ns1.example.com
 EOF
 check "Zone ${TEST_ZONE} created before restart" \
   "$KUBECTL" get zone "$TEST_ZONE" -n "$NAMESPACE"

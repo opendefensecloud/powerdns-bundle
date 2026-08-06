@@ -89,7 +89,7 @@ metadata:
 spec:
   kind: Native
   nameservers:
-    - ns1.example.com.
+    - ns1.example.com
 EOF
 check "Zone status-validate.example.com created" \
   $KUBECTL get zone status-validate.example.com -n "$NAMESPACE"
@@ -164,8 +164,8 @@ check_output "Orphan RRset status.syncStatus is 'Pending'" \
   "$KUBECTL get rrset orphan.nonexistent-zone.example.com -n $NAMESPACE -o jsonpath='{.status.syncStatus}' | grep -qx 'Pending'"
 check_output "Orphan RRset condition status is 'False' or 'Unknown'" \
   "$KUBECTL get rrset orphan.nonexistent-zone.example.com -n $NAMESPACE -o jsonpath='{.status.conditions[0].status}' | grep -qE '^(False|Unknown)$'"
-check_output "Orphan RRset condition reason is 'ZoneNotAvailable'" \
-  "$KUBECTL get rrset orphan.nonexistent-zone.example.com -n $NAMESPACE -o jsonpath='{.status.conditions[0].reason}' | grep -qx 'ZoneNotAvailable'"
+check_output "Orphan RRset condition reason is 'ZoneMissing'" \
+  "$KUBECTL get rrset orphan.nonexistent-zone.example.com -n $NAMESPACE -o jsonpath='{.status.conditions[0].reason}' | grep -qx 'ZoneMissing'"
 check_output "Orphan RRset missing-zone message identifies the missing Zone" \
   "$KUBECTL get rrset orphan.nonexistent-zone.example.com -n $NAMESPACE -o jsonpath='{.status.conditions[0].message}' | grep -qE 'nonexistent-zone\\.example\\.com.*not found|not found.*nonexistent-zone\\.example\\.com'"
 

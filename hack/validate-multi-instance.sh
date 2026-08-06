@@ -447,7 +447,7 @@ metadata:
 spec:
   kind: Native
   nameservers:
-    - ns1.${zone}.
+    - ns1.${zone}
 ---
 apiVersion: dns.cav.enablers.ob/v1alpha2
 kind: RRset

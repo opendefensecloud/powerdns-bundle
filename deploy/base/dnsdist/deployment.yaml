@@ -35,7 +35,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: dnsdist
-          image: powerdns/dnsdist-19:1.9.15@sha256:af0a812fedd2d24cb54c7058cc7b07ca643b44bbf543fe9ae826fc5c663b0801
+          image: powerdns/dnsdist-19:1.9.16@sha256:260b1120947a10c494fad4d93cde33ebace34bf4800c88ebb114dd7f9e829809
           args:
             - --config
             - /etc/dnsdist/dnsdist.conf

@@ -6,6 +6,21 @@ Sections within each milestone use `Additions`, `Changes`, and `Fixes`.
 
 ---
 
+## 2026-08-05 — Operator maintenance
+
+### Changes
+
+- Refreshed the Telekom PowerDNS Operator fork from upstream commit `255d6b0`,
+  preserving `WATCH_NAMESPACE` behavior in `1a1bf0c`; published and pinned the
+  scanned multi-architecture image by digest.
+- Regenerated all four bundled PowerDNS Operator CRDs from the same source
+  revision and removed obsolete Operator CVE suppressions.
+- Updated dnsdist to `1.9.16` and Lightning Stream to `1.0.2` to clear newly
+  disclosed HIGH findings; renewed only the remaining SSH-only Lightning Stream
+  suppressions after scanning the latest stable image.
+
+---
+
 ## 2026-07-7 - v0.1.0
 
 ### Additions

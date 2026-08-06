@@ -147,10 +147,10 @@ The following table lists every image bundled in the OCM package and its expecte
 
 | Component | Upstream image | Localized as (example) |
 |-----------|---------------|------------------------|
-| dnsdist | `powerdns/dnsdist-19:1.9.15` | `<registry>/powerdns/dnsdist-19:1.9.15` |
+| dnsdist | `powerdns/dnsdist-19:1.9.16` | `<registry>/powerdns/dnsdist-19:1.9.16` |
 | pdns-recursor | `powerdns/pdns-recursor-52:5.2.11` | `<registry>/powerdns/pdns-recursor-52:5.2.11` |
 | pdns-auth | `powerdns/pdns-auth-49:4.9.16` | `<registry>/powerdns/pdns-auth-49:4.9.16` |
-| lightningstream | `powerdns/lightningstream:1.0.0` | `<registry>/powerdns/lightningstream:1.0.0` |
+| lightningstream | `powerdns/lightningstream:1.0.2` | `<registry>/powerdns/lightningstream:1.0.2` |
 | garage (multi-instance only) | `dxflrs/garage:v1.0.1` | `<registry>/dxflrs/garage:v1.0.1` |
 
 `<registry>` is the value passed to `--registry` in Step 4. Garage is reserved in the OCM descriptor for multi-instance operation and is not deployed in the PoC; its localization entry is included for completeness.

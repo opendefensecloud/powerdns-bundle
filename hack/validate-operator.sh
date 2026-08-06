@@ -63,6 +63,29 @@ wait_for_rrset_succeeded() {
   return 1
 }
 
+wait_for_cluster_rrset_succeeded() {
+  local name="$1" expected_dns_name="$2"
+  local sync_status dns_entry observed_generation
+
+  for _ in $(seq 1 "$RECONCILE_TIMEOUT"); do
+    sync_status="$("$KUBECTL" get clusterrrset "$name" \
+      -o jsonpath='{.status.syncStatus}' 2>/dev/null || true)"
+    dns_entry="$("$KUBECTL" get clusterrrset "$name" \
+      -o jsonpath='{.status.dnsEntryName}' 2>/dev/null || true)"
+    observed_generation="$("$KUBECTL" get clusterrrset "$name" \
+      -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)"
+
+    if [[ "$sync_status" == "Succeeded" \
+        && "$dns_entry" == "$expected_dns_name" \
+        && "$observed_generation" =~ ^[0-9]+$ ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
 echo "=== Operator Deployment Validation ==="
 echo
 
@@ -97,7 +120,7 @@ metadata:
 spec:
   kind: Native
   nameservers:
-    - ns1.example.com.
+    - ns1.example.com
 EOF
 check "Zone operator-validate.example.com created" \
   "$KUBECTL" get zone operator-validate.example.com -n "$NAMESPACE"
@@ -127,7 +150,45 @@ check "RRset syncStatus is Succeeded with reconciled DNS entry metadata" \
     validate.operator-validate.example.com.
 
 echo
-echo "--- 5. Authoritative server runtime — zone served by PowerDNS ---"
+echo "--- 5. Cluster-scoped CRD prerequisite (ClusterZone) ---"
+cat <<EOF | "$KUBECTL" apply -f - &>/dev/null
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: ClusterZone
+metadata:
+  name: operator-cluster-validate.example.com
+spec:
+  kind: Native
+  nameservers:
+    - ns1.example.com
+EOF
+check "ClusterZone operator-cluster-validate.example.com created" \
+  "$KUBECTL" get clusterzone operator-cluster-validate.example.com
+
+echo
+echo "--- 6. Cluster-scoped CRD reconciliation (ClusterRRset) ---"
+cat <<EOF | "$KUBECTL" apply -f - &>/dev/null
+apiVersion: dns.cav.enablers.ob/v1alpha2
+kind: ClusterRRset
+metadata:
+  name: validate.operator-cluster-validate.example.com
+spec:
+  name: validate.operator-cluster-validate.example.com.
+  type: A
+  ttl: 300
+  records:
+    - 192.0.2.2
+  zoneRef:
+    name: operator-cluster-validate.example.com
+    kind: ClusterZone
+EOF
+check "ClusterRRset validate.operator-cluster-validate.example.com created" \
+  "$KUBECTL" get clusterrrset validate.operator-cluster-validate.example.com
+check "ClusterRRset syncStatus is Succeeded with reconciled DNS entry metadata" \
+  wait_for_cluster_rrset_succeeded validate.operator-cluster-validate.example.com \
+    validate.operator-cluster-validate.example.com.
+
+echo
+echo "--- 7. Authoritative server runtime — zones served by PowerDNS ---"
 AUTH_POD=$("$KUBECTL" get pod -n "$NAMESPACE" -l app.kubernetes.io/name=pdns-auth \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 
@@ -142,18 +203,35 @@ if [[ -n "$AUTH_POD" ]]; then
       "$KUBECTL exec $AUTH_POD -n $NAMESPACE -c pdns-auth -- \
         pdnsutil list-zone operator-validate.example.com \
         | grep -q 'validate\\.operator-validate\\.example\\.com'"
+    check_output "ClusterZone operator-cluster-validate.example.com served by Auth server" \
+      "$KUBECTL exec $AUTH_POD -n $NAMESPACE -c pdns-auth -- \
+        pdnsutil list-zone operator-cluster-validate.example.com"
+    check_output "ClusterRRset validate.operator-cluster-validate.example.com present in Auth server" \
+      "$KUBECTL exec $AUTH_POD -n $NAMESPACE -c pdns-auth -- \
+        pdnsutil list-zone operator-cluster-validate.example.com \
+        | grep -q 'validate\\.operator-cluster-validate\\.example\\.com'"
   elif "$KUBECTL" exec "$AUTH_POD" -n "$NAMESPACE" -c pdns-auth -- \
       sh -c "command -v curl" &>/dev/null; then
     check_output "Zone operator-validate.example.com served by Auth server (curl API)" \
       "$KUBECTL exec $AUTH_POD -n $NAMESPACE -c pdns-auth -- \
         curl -sf http://localhost:8081/api/v1/servers/localhost/zones/operator-validate.example.com \
         -H \"X-API-Key: ${PDNS_API_KEY}\""
+    check_output "ClusterZone and ClusterRRset served by Auth server (curl API)" \
+      "$KUBECTL exec $AUTH_POD -n $NAMESPACE -c pdns-auth -- \
+        curl -sf http://localhost:8081/api/v1/servers/localhost/zones/operator-cluster-validate.example.com \
+        -H \"X-API-Key: ${PDNS_API_KEY}\" \
+        | grep -q 'validate\\.operator-cluster-validate\\.example\\.com'"
   elif "$KUBECTL" exec "$AUTH_POD" -n "$NAMESPACE" -c pdns-auth -- \
       sh -c "command -v wget" &>/dev/null; then
     check_output "Zone operator-validate.example.com served by Auth server (wget API)" \
       "$KUBECTL exec $AUTH_POD -n $NAMESPACE -c pdns-auth -- \
         wget -qO- --header \"X-API-Key: ${PDNS_API_KEY}\" \
         http://localhost:8081/api/v1/servers/localhost/zones/operator-validate.example.com"
+    check_output "ClusterZone and ClusterRRset served by Auth server (wget API)" \
+      "$KUBECTL exec $AUTH_POD -n $NAMESPACE -c pdns-auth -- \
+        wget -qO- --header \"X-API-Key: ${PDNS_API_KEY}\" \
+        http://localhost:8081/api/v1/servers/localhost/zones/operator-cluster-validate.example.com \
+        | grep -q 'validate\\.operator-cluster-validate\\.example\\.com'"
   else
     echo "  FAIL  pdnsutil, curl, and wget all unavailable in pdns-auth container — cannot verify runtime serving"
     ((FAIL++)) || true
@@ -166,6 +244,8 @@ fi
 echo
 if [[ "$CLEANUP" == "true" ]]; then
   echo "--- Cleanup ---"
+  "$KUBECTL" delete clusterrrset validate.operator-cluster-validate.example.com --ignore-not-found &>/dev/null
+  "$KUBECTL" delete clusterzone operator-cluster-validate.example.com --ignore-not-found &>/dev/null
   "$KUBECTL" delete rrset validate.operator-validate.example.com -n "$NAMESPACE" --ignore-not-found &>/dev/null
   "$KUBECTL" delete zone operator-validate.example.com -n "$NAMESPACE" --ignore-not-found &>/dev/null
   echo "  Done."

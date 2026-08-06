@@ -3,105 +3,62 @@
 # Policy: every entry below is a HIGH/CRITICAL, fix-available finding that
 # originates in a third-party module or base image we do not build ourselves,
 # and for which no patched upstream image/digest was published as of
-# 2026-07-06 (verified by scanning the latest available tags). Each suppression
+# 2026-08-05 (verified by scanning the latest available tags). Each suppression
 # is time-boxed via `expired-at`; once expired the finding re-fails the gate and
 # must be re-triaged (bump the image digest or renew with fresh justification).
 #
 # The dnsdist / pdns-recursor / pdns-authoritative base-image CVEs previously
 # listed here were cleared on 2026-07-06 by bumping to rebuilt upstream patch
-# images (dnsdist 1.9.15, pdns-recursor 5.2.11, pdns-auth 4.9.16), which all
-# scan clean. Only the lightningstream and PowerDNS-operator binaries — whose
-# CVEs live in statically-linked Go modules and need an upstream/operator
-# rebuild — remain suppressed below.
+# images (dnsdist 1.9.16, pdns-recursor 5.2.11, pdns-auth 4.9.16), which all
+# scan clean. The refreshed PowerDNS Operator image also scans clean, leaving
+# only lightningstream findings that require an upstream rebuild suppressed
+# below.
 #
-# Review/renewal date: 2026-08-05
+# Review/renewal date: 2026-09-05
 vulnerabilities:
   # --- lightningstream: golang.org/x/crypto (SSH) compiled into the binary ---
-  - id: CVE-2026-39827
+  - id: CVE-2026-39831
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
-    expired-at: 2026-08-05
+    expired-at: 2026-09-05
   - id: CVE-2026-39828
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
-    expired-at: 2026-08-05
+    expired-at: 2026-09-05
   - id: CVE-2026-39829
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
-    expired-at: 2026-08-05
+    expired-at: 2026-09-05
   - id: CVE-2026-39830
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
-    expired-at: 2026-08-05
+    expired-at: 2026-09-05
   - id: CVE-2026-39832
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
-    expired-at: 2026-08-05
+    expired-at: 2026-09-05
   - id: CVE-2026-39835
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
-    expired-at: 2026-08-05
+    expired-at: 2026-09-05
   - id: CVE-2026-42508
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
-    expired-at: 2026-08-05
+    expired-at: 2026-09-05
   - id: CVE-2026-46595
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
-    expired-at: 2026-08-05
+    expired-at: 2026-09-05
   - id: CVE-2026-46597
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
-    expired-at: 2026-08-05
-  # --- lightningstream: Debian OpenSSL/libssl in the image base ---
-  - id: CVE-2026-45447
-    # HIGH in libssl3t64,openssl,openssl-provider-legacy (lightningstream)
-    statement: >-
-      Debian OpenSSL/libssl CVE in the lightningstream image base; no rebuilt upstream tag/digest published as of 2026-07-06. DoS/UAF in TLS code paths — lightningstream is a TLS client to the S3/HTTPS object store, not a server for untrusted input. Time-boxed pending upstream image rebuild.
-    expired-at: 2026-08-05
-  # --- powerdns-operator: golang.org/x/net compiled into the binary ---
-  - id: CVE-2026-25681
-    # HIGH in golang.org/x/net (powerdns-operator)
-    statement: >-
-      golang.org/x/net CVE compiled into the operator binary (HTML/HTTP2 parsing); the operator does not parse untrusted HTML and runs with restricted RBAC. Fixed by the next operator rebuild against patched modules.
-    expired-at: 2026-08-05
-  - id: CVE-2026-27136
-    # HIGH in golang.org/x/net (powerdns-operator)
-    statement: >-
-      golang.org/x/net CVE compiled into the operator binary (HTML/HTTP2 parsing); the operator does not parse untrusted HTML and runs with restricted RBAC. Fixed by the next operator rebuild against patched modules.
-    expired-at: 2026-08-05
-  - id: CVE-2026-33814
-    # HIGH in golang.org/x/net (powerdns-operator)
-    statement: >-
-      golang.org/x/net CVE compiled into the operator binary (HTML/HTTP2 parsing); the operator does not parse untrusted HTML and runs with restricted RBAC. Fixed by the next operator rebuild against patched modules.
-    expired-at: 2026-08-05
-  - id: CVE-2026-39821
-    # HIGH in golang.org/x/net (powerdns-operator)
-    statement: >-
-      golang.org/x/net CVE compiled into the operator binary (HTML/HTTP2 parsing); the operator does not parse untrusted HTML and runs with restricted RBAC. Fixed by the next operator rebuild against patched modules.
-    expired-at: 2026-08-05
-  - id: CVE-2026-42502
-    # HIGH in golang.org/x/net (powerdns-operator)
-    statement: >-
-      golang.org/x/net CVE compiled into the operator binary (HTML/HTTP2 parsing); the operator does not parse untrusted HTML and runs with restricted RBAC. Fixed by the next operator rebuild against patched modules.
-    expired-at: 2026-08-05
-  # --- powerdns-operator: Go standard library ---
-  - id: CVE-2026-27145
-    # HIGH in stdlib (powerdns-operator)
-    statement: >-
-      Go standard-library CVE compiled into the operator binary; fixed by rebuilding against a patched Go toolchain. Restricted RBAC limits exposure.
-    expired-at: 2026-08-05
-  - id: CVE-2026-42504
-    # HIGH in stdlib (powerdns-operator)
-    statement: >-
-      Go standard-library CVE compiled into the operator binary; fixed by rebuilding against a patched Go toolchain. Restricted RBAC limits exposure.
-    expired-at: 2026-08-05
+    expired-at: 2026-09-05

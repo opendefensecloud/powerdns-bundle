@@ -33,10 +33,10 @@ resources:
   - name: dnsdist
     type: ociImage
     relation: external
-    version: "1.9.15"
+    version: "1.9.16"
     access:
       type: ociArtifact
-      imageReference: powerdns/dnsdist-19:1.9.15@sha256:af0a812fedd2d24cb54c7058cc7b07ca643b44bbf543fe9ae826fc5c663b0801
+      imageReference: powerdns/dnsdist-19:1.9.16@sha256:260b1120947a10c494fad4d93cde33ebace34bf4800c88ebb114dd7f9e829809
     labels:
       - name: component
         value: dns-frontend
@@ -66,10 +66,10 @@ resources:
   - name: lightningstream
     type: ociImage
     relation: external
-    version: "1.0.0"
+    version: "1.0.2"
     access:
       type: ociArtifact
-      imageReference: powerdns/lightningstream:1.0.0@sha256:d1d2030155b5f4d44a413de0dd997e1663cc98a00fd53b3b96166003f5343678
+      imageReference: powerdns/lightningstream:1.0.2@sha256:31acb91faadda5ddb5fc03073cd464cecbce7be0f752d70a39ef2ebb0065539f
     labels:
       - name: component
         value: lmdb-replication
@@ -77,10 +77,10 @@ resources:
   - name: pdns-operator
     type: ociImage
     relation: external
-    version: "0.6.0-telekom.b23ee7d"
+    version: "0.6.0-telekom.1a1bf0c"
     access:
       type: ociArtifact
-      imageReference: ghcr.io/telekom/powerdns-operator:sha-b23ee7d@sha256:a2ce92f77118fec2b3de840d5508f80bddb6317230dc61f86f7e403079303411
+      imageReference: ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7
     labels:
       - name: component
         value: dns-operator

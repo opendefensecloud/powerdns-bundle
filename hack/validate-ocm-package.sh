@@ -35,6 +35,7 @@ require() {
 }
 
 require ocm
+require jq
 
 if [ ! -f "${CTF_FILE}" ]; then
   echo "ERROR: CTF archive not found at '${CTF_FILE}'." >&2
@@ -55,10 +56,11 @@ fi
 
 echo ""
 echo "==> All expected resources present…"
-OCM_OUTPUT=$(ocm get resources "${CTF_FILE}//${COMPONENT_REF}" -o json 2>/dev/null || true)
+OCM_OUTPUT=$(ocm get resources "${CTF_FILE}//${COMPONENT_REF}" -o json)
 
 for resource in "${EXPECTED_RESOURCES[@]}"; do
-  if echo "${OCM_OUTPUT}" | grep -q "\"${resource}\""; then
+  if jq -e --arg resource "${resource}" \
+    '.items | any(.element.name == $resource)' <<<"${OCM_OUTPUT}" &>/dev/null; then
     echo "    PASS — resource '${resource}' found"
   else
     echo "    FAIL — resource '${resource}' missing" >&2

@@ -601,33 +601,47 @@ These prerequisites are independent of the cloud provider; the EKS-specific exam
 
 The namespace model keeps Kubernetes objects, credentials, Services, and persistent data separate for each DNS stack. Runtime isolation is validated by creating different zones and records in two instances and checking both the Kubernetes API and the backing Authoritative Server state.
 
-Each instance runs its own PowerDNS Operator deployment, configured with a namespace-local `PDNS_API_URL` and the `WATCH_NAMESPACE` environment variable set to the instance namespace. With `WATCH_NAMESPACE` set, the operator's manager cache is restricted to that namespace, so namespaced `Zone` and `RRset` resources from other namespaces are neither watched nor reconciled. As defense in depth, the per-instance operator `ServiceAccount` is granted only a namespaced `Role` for the namespaced CRDs and operational resources (`zones`, `rrsets`, `events`, `leases`); a minimal `ClusterRole` covers the cluster-scoped `ClusterZone` / `ClusterRRset` CRDs that the operator binary always reconciles. End-to-end configuration and runtime isolation is verified by `hack/validate-multi-instance.sh`.
+Each instance runs its own PowerDNS Operator deployment, configured with a namespace-local `PDNS_API_URL` and the `WATCH_NAMESPACE` environment variable set to the instance namespace. With `WATCH_NAMESPACE` set, the operator's manager cache is restricted to that namespace, so namespaced `Zone` and `RRset` resources from other namespaces are neither watched nor reconciled. As defense in depth, the per-instance operator `ServiceAccount` is granted only a namespaced `Role` for the namespaced CRDs and operational resources (`zones`, `rrsets`, `events`, `leases`); a minimal `ClusterRole` covers the cluster-scoped `ClusterZone` / `ClusterRRset` CRDs that the operator binary always reconciles. End-to-end configuration and runtime isolation is verified by [`hack/validate-multi-instance.sh`](../hack/validate-multi-instance.sh).
 
-The shipping image (`ghcr.io/telekom/powerdns-operator:sha-b23ee7d`) is built from a fork,
-[`telekom/PowerDNS-Operator`](https://github.com/telekom/PowerDNS-Operator), branch
-[`feat/watch-namespace-env`](https://github.com/telekom/PowerDNS-Operator/tree/feat/watch-namespace-env),
-that adds the `WATCH_NAMESPACE` support on top of the upstream
-[`powerdns-operator/PowerDNS-Operator`](https://github.com/powerdns-operator/PowerDNS-Operator)
-project — it is **not** the plain upstream image, which is why searching the upstream
-`main` branch alone for `WATCH_NAMESPACE` finds no matches. The change is proposed
-upstream as [powerdns-operator/PowerDNS-Operator#307](https://github.com/powerdns-operator/PowerDNS-Operator/issues/307);
-once a release containing the patch is published, the deployment will switch to the
-upstream tag and this fork will be retired.
+The shipping image
+(`ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7`)
+is built from the public maintained branch
+[`telekom/PowerDNS-Operator:feat/watch-namespace-env`](https://github.com/telekom/PowerDNS-Operator/tree/feat/watch-namespace-env)
+at commit
+[`1a1bf0c`](https://github.com/telekom/PowerDNS-Operator/commit/1a1bf0c19fc86512cc3b13829e298a99c3aa7d93).
+That commit reapplies the `WATCH_NAMESPACE` patch to pinned upstream commit
+[`powerdns-operator/PowerDNS-Operator@255d6b0`](https://github.com/powerdns-operator/PowerDNS-Operator/commit/255d6b01372aa94118d2e875553af783fb5062e4).
+It is not the plain upstream image; searching the upstream `main` branch alone
+for `WATCH_NAMESPACE` therefore finds no matches.
+The public
+[`1a1bf0c` build workflow](https://github.com/telekom/PowerDNS-Operator/actions/runs/31013044539)
+passed generated-code checks, lint, unit tests, PowerDNS 4.9 and 5.0 end-to-end
+tests, image scanning, and multi-architecture publishing.
+The previously deployed source and pre-refresh feature branch remain
+independently verifiable through the
+[`archive/watch-namespace-deployed-b23ee7d`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-deployed-b23ee7d)
+and
+[`archive/watch-namespace-pre-refresh-5c6edda`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-pre-refresh-5c6edda)
+tags. Upstream support is tracked in
+[powerdns-operator/PowerDNS-Operator#307](https://github.com/powerdns-operator/PowerDNS-Operator/issues/307);
+once an upstream release contains the patch, the deployment can switch to the
+upstream image.
 
 This capability is independently verifiable without any internal knowledge:
 
-- **Fork/branch**: [`telekom/PowerDNS-Operator@feat/watch-namespace-env`](https://github.com/telekom/PowerDNS-Operator/tree/feat/watch-namespace-env) — inspect the source directly to confirm the manager registers `WATCH_NAMESPACE` and restricts its cache accordingly.
-- **Upstream tracking issue**: [powerdns-operator/PowerDNS-Operator#307](https://github.com/powerdns-operator/PowerDNS-Operator/issues/307).
-- **Deployed configuration**: `deploy/base/operator/deployment.yaml` sets `WATCH_NAMESPACE`; `deploy/base/operator/rbac.yaml` grants the matching namespaced `Role` alongside a minimal cluster-scoped `ClusterRole`.
-- **Runtime proof**: `hack/validate-multi-instance.sh` (see below) provisions two simultaneous instances and asserts cross-namespace isolation with explicit negative RBAC checks (`kubectl auth can-i` denials), in addition to functional zone/record isolation.
+- **Deployed configuration:** [`deploy/base/operator/deployment.yaml`](../deploy/base/operator/deployment.yaml) sets `WATCH_NAMESPACE`; [`deploy/base/operator/rbac.yaml`](../deploy/base/operator/rbac.yaml) grants the matching namespaced `Role` alongside a minimal cluster-scoped `ClusterRole`.
+- **Runtime proof:** [`hack/validate-multi-instance.sh`](../hack/validate-multi-instance.sh) provisions two simultaneous instances and asserts cross-namespace isolation with explicit negative RBAC checks (`kubectl auth can-i` denials), in addition to functional zone and record isolation.
 
-Focused validation:
+Focused validation is implemented in
+[`hack/validate-multi-instance.sh`](../hack/validate-multi-instance.sh):
 
 ```bash
 ./hack/validate-multi-instance.sh --cleanup
 ```
 
-As part of the full cluster validation suite:
+It is also part of
+[`hack/validate-cluster.sh`](../hack/validate-cluster.sh), the full cluster
+validation suite:
 
 ```bash
 RUN_MULTI_INSTANCE=true ./hack/validate-cluster.sh --cleanup

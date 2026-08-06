@@ -159,7 +159,7 @@ metadata:
 spec:
   kind: Native
   nameservers:
-    - ns1.example.com.
+    - ns1.example.com
 EOF
 check "operator-managed Zone CR created" "$KUBECTL" get zone "$ZONE_CR" -n "$NAMESPACE"
 # Gate on the operator actually reconciling the zone into the Auth server before the

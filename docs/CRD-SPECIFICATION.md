@@ -2,6 +2,7 @@
 
 **Status:** Approved
 **Source:** PowerDNS Operator OSS ([powerdns-operator/PowerDNS-Operator](https://github.com/powerdns-operator/PowerDNS-Operator))
+**Bundled revision:** [`telekom/PowerDNS-Operator@1a1bf0c`](https://github.com/telekom/PowerDNS-Operator/commit/1a1bf0c19fc86512cc3b13829e298a99c3aa7d93), based on upstream [`255d6b0`](https://github.com/powerdns-operator/PowerDNS-Operator/commit/255d6b01372aa94118d2e875553af783fb5062e4)
 **API Group / Version:** `dns.cav.enablers.ob/v1alpha2`
 
 ---
@@ -351,14 +352,21 @@ status:
 
 | Type | Normal value | Meaning |
 |---|---|---|
-| `Available` | `True` after successful Zone reconciliation; `False` / `Unknown` on unresolved dependencies or errors | The desired DNS state is not yet live when false; inspect `message` for the cause |
+| `Available` | `True` after successful reconciliation; `False` / `Unknown` on unresolved dependencies or errors | The desired DNS state is not yet live when false; inspect `message` for the cause |
 
-The `reason` field uses token values such as `Synced`, `SynchronizationFailed`, `ZoneNotAvailable`, and `APIError`. The `message` field contains a human-readable explanation and is the primary field to inspect when troubleshooting. Successful RRset reconciliation in the current operator image reports `syncStatus: Succeeded` plus `dnsEntryName`, `lastUpdateTime`, and `observedGeneration`; it does not currently emit a success condition.
+The `reason` field uses token values such as `Succeeded`, `SynchronizationFailed`, `ZoneMissing`, `ZoneNotAvailable`, and `Duplicated`. `ZoneMissing` means the referenced Zone does not exist, while `ZoneNotAvailable` means it exists but is not available. The `message` field contains a human-readable explanation and is the primary field to inspect when troubleshooting. Successful reconciliation reports an `Available: "True"` condition in addition to `syncStatus: Succeeded` and resource-specific status fields.
 
 ### 6.4 Typical RRset status after successful sync
 
 ```yaml
 status:
+  conditions:
+    - type: Available
+      status: "True"
+      reason: Succeeded
+      message: Succeeded
+      observedGeneration: 3
+      lastTransitionTime: "2026-04-28T10:00:00Z"
   dnsEntryName: app.intern.example.com.
   lastUpdateTime: "2026-04-28T10:00:00Z"
   observedGeneration: 3
@@ -373,8 +381,8 @@ status:
   conditions:
     - type: Available
       status: "True"
-      reason: Synced
-      message: Zone synchronized
+      reason: Succeeded
+      message: Succeeded
       observedGeneration: 3
       lastTransitionTime: "2026-04-28T10:00:00Z"
   dnssec: false
@@ -397,8 +405,8 @@ status:
   conditions:
     - type: Available
       status: "False"
-      reason: ZoneNotAvailable
-      message: "non-existent zone:Zone.dns.cav.enablers.ob \"missing-zone.example\" not found"
+      reason: ZoneMissing
+      message: "Missing Zone:Zone.dns.cav.enablers.ob \"missing-zone.example\" not found"
       observedGeneration: 3
       lastTransitionTime: "2026-04-28T10:00:00Z"
 ```
@@ -430,6 +438,13 @@ The **Sync** column provides at-a-glance status without needing to inspect the f
 $ kubectl describe rrset app.intern.example.com -n dns
 ...
 Status:
+  Conditions:
+    Last Transition Time:  2026-04-28T10:00:00Z
+    Message:               Succeeded
+    Observed Generation:   1
+    Reason:                Succeeded
+    Status:                True
+    Type:                  Available
   Dns Entry Name:           app.intern.example.com.
   Last Update Time:         2026-04-28T10:00:00Z
   Observed Generation:     1
@@ -444,9 +459,9 @@ $ kubectl describe rrset orphan.missing-zone.example -n dns
 Status:
   Conditions:
     Last Transition Time:  2026-04-28T10:01:00Z
-    Message:               non-existent zone:Zone.dns.cav.enablers.ob "missing-zone.example" not found
+    Message:               Missing Zone:Zone.dns.cav.enablers.ob "missing-zone.example" not found
     Observed Generation:   1
-    Reason:                ZoneNotAvailable
+    Reason:                ZoneMissing
     Status:                False
     Type:                  Available
   Observed Generation:     1
