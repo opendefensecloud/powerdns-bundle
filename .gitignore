@@ -1,0 +1,47 @@
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kubernetes
+kubeconfig
+*.kubeconfig
+
+# Helm
+*.tgz
+charts/*/charts/
+
+# OCM
+*.ocm
+component-archive/
+ocm-output/
+manifests.tar
+ocm/ctf.tar
+ocm/ctf-bundled.tar
+
+# Secrets (never commit)
+*.key
+*.pem
+*secret*.yaml.local
+
+# Build artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+
+# Test artifacts
+coverage.txt
+*.test
+*.out
+
+# Temporary
+tmp/
+temp/

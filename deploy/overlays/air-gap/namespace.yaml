@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dns
+  labels:
+    # Pod Security Standards: enforce Baseline (the authoritative pod's
+    # repair-lmdb-permissions initContainer must run as root to chown the LMDB
+    # PVC, which Restricted forbids), while surfacing Restricted-level gaps via
+    # warn/audit so the remaining exceptions stay visible.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

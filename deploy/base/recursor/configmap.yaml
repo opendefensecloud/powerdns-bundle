@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pdns-recursor-config
+  namespace: dns
+data:
+  recursor.conf: |
+    # Bind on all interfaces, port 53 (UDP and TCP handled by the daemon)
+    local-address=0.0.0.0
+    local-port=53
+
+    # Allow queries from all cluster-internal sources
+    allow-from=0.0.0.0/0,::/0
+
+    # Upstream resolvers for external (non-local) domains
+    # Replace with internal forwarders or remove this line for full root recursion
+    forward-zones-recurse=.=1.1.1.1;8.8.8.8
+
+    # Forward local zones to the Authoritative Server
+    # Placeholder zone names — override in overlays for actual zone names.
+    # The deployment entrypoint replaces this placeholder with the Kubernetes
+    # Service IP from PDNS_AUTH_SERVICE_HOST before Recursor starts.
+    forward-zones=intern.example.com=__PDNS_AUTH_SERVICE_HOST__:53
+    forward-zones+=example.local=__PDNS_AUTH_SERVICE_HOST__:53
+
+    # Native Prometheus metrics endpoint
+    webserver=yes
+    webserver-address=0.0.0.0
+    webserver-port=8082
+    webserver-allow-from=0.0.0.0/0,::/0
+
+    # Control socket directory (required when readOnlyRootFilesystem is set)
+    socket-dir=/run/pdns-recursor

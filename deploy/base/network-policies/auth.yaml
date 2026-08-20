@@ -1,0 +1,48 @@
+# Authoritative server: serves DNS to the recursor and dnsdist, and exposes the
+# PowerDNS API (port 8081) to the operator. Port 8081 also serves Prometheus
+# metrics, so the monitoring namespace is allowed to the same port.
+#
+# Egress is declared with no rules: in the single-instance (filesystem-sync)
+# topology the authoritative server initiates no outbound connections. Only the
+# shared kube-dns egress policy applies additively.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: auth
+  namespace: dns
+  labels:
+    app.kubernetes.io/part-of: powerdns-ocm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pdns-auth
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # DNS from the recursor (forwarded local zones) and dnsdist (direct lookups).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pdns-recursor
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: dnsdist
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Port 8081 carries both the PowerDNS API (consumed by the operator) and the
+    # Prometheus metrics endpoint (scraped from the monitoring namespace). L4
+    # policy cannot separate the two; the API is protected by its API key.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pdns-operator
+        - namespaceSelector:
+            matchLabels:
+              network-policy/monitoring: "true"
+      ports:
+        - protocol: TCP
+          port: 8081

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dns
+  labels:
+    app.kubernetes.io/name: powerdns
+    app.kubernetes.io/part-of: powerdns-ocm
+    # Pod Security Standards: enforce Baseline, warn/audit at Restricted.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

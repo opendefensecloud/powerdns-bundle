@@ -1,0 +1,89 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pdns-operator
+  namespace: dns
+  labels:
+    app.kubernetes.io/name: pdns-operator
+    app.kubernetes.io/component: dns-operator
+rules:
+  # Namespaced CRDs — Zone and RRset reconcilers
+  - apiGroups: ["dns.cav.enablers.ob"]
+    resources:
+      - zones
+      - zones/status
+      - zones/finalizers
+      - rrsets
+      - rrsets/status
+      - rrsets/finalizers
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Kubernetes events — emitted by the controller on reconciliation
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Leader election — required by controller-runtime, lease lives in the operator's namespace
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pdns-operator
+  namespace: dns
+  labels:
+    app.kubernetes.io/name: pdns-operator
+    app.kubernetes.io/component: dns-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pdns-operator
+subjects:
+  - kind: ServiceAccount
+    name: pdns-operator
+    namespace: dns
+
+---
+
+# Slim ClusterRole — only the cluster-scoped CRDs that the operator binary
+# always reconciles. Kubernetes RBAC does not allow a Role to grant access
+# to cluster-scoped resources, so these rules cannot move into the Role
+# above. Combined with WATCH_NAMESPACE on the Deployment, the per-instance
+# ServiceAccount is otherwise confined to its own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pdns-operator
+  labels:
+    app.kubernetes.io/name: pdns-operator
+    app.kubernetes.io/component: dns-operator
+rules:
+  - apiGroups: ["dns.cav.enablers.ob"]
+    resources:
+      - clusterzones
+      - clusterzones/status
+      - clusterzones/finalizers
+      - clusterrrsets
+      - clusterrrsets/status
+      - clusterrrsets/finalizers
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pdns-operator
+  labels:
+    app.kubernetes.io/name: pdns-operator
+    app.kubernetes.io/component: dns-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pdns-operator
+subjects:
+  - kind: ServiceAccount
+    name: pdns-operator
+    namespace: dns

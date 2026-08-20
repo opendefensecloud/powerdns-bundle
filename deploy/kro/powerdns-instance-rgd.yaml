@@ -1,0 +1,1389 @@
+# KRO ResourceGraphDefinition — PowerDNS DNS Instance
+#
+# Targets: KRO v0.2+ (apiVersion: kro.run/v1alpha1)
+# Prerequisites:
+#   - KRO installed in the cluster (kubectl apply -k
+#       https://github.com/kro-run/kro/config/default?ref=v0.2.1)
+#   - PowerDNS Operator CRDs applied:
+#       kubectl apply -k deploy/base/crds/
+#
+# Usage:
+#   # Install the RGD (once per cluster):
+#   kubectl apply -f deploy/kro/powerdns-instance-rgd.yaml
+#
+#   # Create a single-instance DNS stack:
+#   kubectl apply -f deploy/kro/powerdns-instance-example.yaml
+#
+#   # Create two namespace-separated instances (multi-instance scenario):
+#   kubectl apply -f deploy/kro/powerdns-multi-instance-example.yaml
+#
+# Dependency graph (→ = "must be ready before"):
+#   targetNamespace
+#     → serviceAccount, configmapAuthConfig, configmapLightningStream,
+#       configmapRecursorConfig, configmapDnsdistConfig,
+#       configmapGarage (multiInstance only),
+#       secretApiKey, pvcAuthData
+#     → role, roleBinding                 (namespace-scoped: zones, rrsets, events, leases)
+#     → clusterRole, clusterRoleBinding   (slim: only clusterzones/clusterrrsets, required by operator)
+#     → serviceAuth, (serviceGarage, deploymentGarage — multiInstance only)
+#       → deploymentAuth
+#         → serviceRecursor, deploymentRecursor
+#           → serviceDnsdist, deploymentDnsdist
+#   serviceAccount + roleBinding + clusterRoleBinding + secretApiKey + deploymentAuth
+#     → serviceOperatorMetrics, deploymentOperator
+
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: powerdnsinstance
+  labels:
+    app.kubernetes.io/name: powerdns-ocm
+    app.kubernetes.io/component: kro-rgd
+    app.kubernetes.io/version: "0.1.0-poc"
+spec:
+
+  # ---------------------------------------------------------------------------
+  # Schema — defines the PowerDNSInstance custom resource that users create
+  # ---------------------------------------------------------------------------
+  schema:
+    apiVersion: v1alpha1
+    kind: PowerDNSInstance
+    group: kro.run
+    spec:
+      namespace: string | default="dns"
+      pdnsApiKey: string | required=true
+      multiInstance: boolean | default=false
+
+  # ---------------------------------------------------------------------------
+  # Resources — ordered by KRO via implicit CEL-expression dependencies
+  # ---------------------------------------------------------------------------
+  resources:
+
+    # =========================================================================
+    # Layer 0 — Namespace
+    # Creates the isolated namespace for this DNS instance.
+    # =========================================================================
+    - id: targetNamespace
+      template:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: ${schema.spec.namespace}
+          labels:
+            # Pod Security Standards: per-instance namespaces enforce Baseline
+            # (garage runs as root and the authoritative initContainer chowns
+            # the LMDB PVC as root), with warn/audit at Restricted.
+            pod-security.kubernetes.io/enforce: baseline
+            pod-security.kubernetes.io/enforce-version: latest
+            pod-security.kubernetes.io/warn: restricted
+            pod-security.kubernetes.io/warn-version: latest
+            pod-security.kubernetes.io/audit: restricted
+            pod-security.kubernetes.io/audit-version: latest
+      readyWhen:
+        - ${targetNamespace.status.phase == "Active"}
+
+    # =========================================================================
+    # Layer 1 — ServiceAccount
+    # Depends on targetNamespace (references targetNamespace.metadata.name).
+    # =========================================================================
+    - id: serviceAccount
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: pdns-operator
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-operator
+            app.kubernetes.io/component: dns-operator
+        automountServiceAccountToken: true
+
+    # =========================================================================
+    # Layer 2 — Role (namespace-scoped, the bulk of operator permissions)
+    # Confines reconciler writes (zones, rrsets), event recording, and the
+    # leader-election lease to the target namespace. Defense-in-depth
+    # alongside WATCH_NAMESPACE on the operator binary.
+    # =========================================================================
+    - id: role
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          name: pdns-operator
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-operator
+            app.kubernetes.io/component: dns-operator
+        rules:
+          - apiGroups: ["dns.cav.enablers.ob"]
+            resources:
+              - zones
+              - zones/status
+              - zones/finalizers
+              - rrsets
+              - rrsets/status
+              - rrsets/finalizers
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          - apiGroups: [""]
+            resources: ["events"]
+            verbs: ["create", "patch"]
+          - apiGroups: ["coordination.k8s.io"]
+            resources: ["leases"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+    # =========================================================================
+    # Layer 2 — RoleBinding for the namespace-scoped Role
+    # =========================================================================
+    - id: roleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: pdns-operator
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-operator
+            app.kubernetes.io/component: dns-operator
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: Role
+          name: ${role.metadata.name}
+        subjects:
+          - kind: ServiceAccount
+            name: ${serviceAccount.metadata.name}
+            namespace: ${targetNamespace.metadata.name}
+
+    # =========================================================================
+    # Layer 2 — Slim ClusterRole (cluster-scoped CRDs only)
+    # The operator binary always registers ClusterZone/ClusterRRset
+    # reconcilers and common.go queries their field indices, both of which
+    # require cluster-wide list/watch. Kubernetes RBAC does not allow a
+    # Role to grant access to cluster-scoped resources, so the cluster-scoped
+    # CRDs remain in a ClusterRole. Name is qualified with the target
+    # namespace to avoid collisions across multiple PowerDNSInstance objects.
+    # =========================================================================
+    - id: clusterRole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: pdns-operator-${schema.spec.namespace}
+          labels:
+            app.kubernetes.io/name: pdns-operator
+            app.kubernetes.io/component: dns-operator
+        rules:
+          - apiGroups: ["dns.cav.enablers.ob"]
+            resources:
+              - clusterzones
+              - clusterzones/status
+              - clusterzones/finalizers
+              - clusterrrsets
+              - clusterrrsets/status
+              - clusterrrsets/finalizers
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+    # =========================================================================
+    # Layer 3 — ClusterRoleBinding for the slim ClusterRole
+    # =========================================================================
+    - id: clusterRoleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: pdns-operator-${schema.spec.namespace}
+          labels:
+            app.kubernetes.io/name: pdns-operator
+            app.kubernetes.io/component: dns-operator
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: ${clusterRole.metadata.name}
+        subjects:
+          - kind: ServiceAccount
+            name: ${serviceAccount.metadata.name}
+            namespace: ${targetNamespace.metadata.name}
+
+    # =========================================================================
+    # Layer 4 — Secret + ConfigMaps + PVC
+    # All depend on targetNamespace. Created in parallel once namespace is Active.
+    # =========================================================================
+    - id: secretApiKey
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: pdns-operator-api-key
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-operator
+            app.kubernetes.io/component: dns-operator
+        type: Opaque
+        stringData:
+          api-key: ${schema.spec.pdnsApiKey}
+
+    - id: secretReplicationCredentials
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: pdns-replication-credentials
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-replication
+            app.kubernetes.io/component: replication-credentials
+        type: Opaque
+        stringData:
+          # Deterministic credentials for the ephemeral in-cluster Garage used by
+          # this generated stack. Replace these for persistent shared storage.
+          s3-access-key: GK000000000000000000000000
+          s3-secret-key: "0000000000000000000000000000000000000000000000000000000000000000"
+          rpc-secret: "2222222222222222222222222222222222222222222222222222222222222222"
+          admin-token: garage-admin-token
+          metrics-token: garage-metrics-token
+
+    - id: configmapAuthConfig
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: pdns-auth-config
+          namespace: ${targetNamespace.metadata.name}
+        data:
+          pdns.conf: |
+            launch=lmdb
+            lmdb-filename=/var/lib/powerdns/pdns.lmdb
+            # Required for Lightning Stream compatibility; PowerDNS 4.9 removed the
+            # previous mapasync sync mode and requires a single shard in this mode.
+            lmdb-lightning-stream=yes
+            lmdb-shards=1
+            # Match Lightning Stream's LMDB map_size so both processes can open the same environment.
+            lmdb-map-size=1000
+
+            api=yes
+            api-key=${schema.spec.pdnsApiKey}
+
+            webserver=yes
+            webserver-address=0.0.0.0
+            webserver-port=8081
+            webserver-allow-from=0.0.0.0/0,::/0
+
+            socket-dir=/run/pdns-auth
+
+    # Single-instance: Lightning Stream writes snapshots to the local PVC filesystem.
+    - id: configmapLightningStreamFS
+      includeWhen:
+        - ${!schema.spec.multiInstance}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: lightningstream-config
+          namespace: ${targetNamespace.metadata.name}
+        data:
+          lightningstream.yaml: |
+            lmdbs:
+              main:
+                path: /var/lib/powerdns/pdns.lmdb
+                options:
+                  no_subdir: true
+                  create: true
+                  map_size: 1000MB
+                schema_tracks_changes: true
+              shard:
+                path: /var/lib/powerdns/pdns.lmdb-0
+                options:
+                  no_subdir: true
+                  create: true
+                  map_size: 1000MB
+                schema_tracks_changes: true
+
+            storage:
+              type: fs
+              options:
+                root_path: /var/lib/powerdns/snapshots
+
+            lmdb_poll_interval: 1s
+            storage_poll_interval: 1s
+
+    # Multi-instance: Lightning Stream syncs snapshots via Garage S3 so that
+    # multiple pdns-auth replicas share a consistent LMDB view.
+    # The generated Garage deployment bootstraps its validation layout, S3 key,
+    # and bucket before Lightning Stream finishes S3 initialisation.
+    - id: configmapLightningStreamS3
+      includeWhen:
+        - ${schema.spec.multiInstance}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: lightningstream-config
+          namespace: ${targetNamespace.metadata.name}
+        data:
+          lightningstream.yaml: |
+            lmdbs:
+              main:
+                path: /var/lib/powerdns/pdns.lmdb
+                options:
+                  no_subdir: true
+                  create: true
+                  map_size: 1000MB
+                schema_tracks_changes: true
+              shard:
+                path: /var/lib/powerdns/pdns.lmdb-0
+                options:
+                  no_subdir: true
+                  create: true
+                  map_size: 1000MB
+                schema_tracks_changes: true
+
+            storage:
+              type: s3
+              options:
+                endpoint_url: http://garage.${schema.spec.namespace}.svc.cluster.local:3900
+                bucket: pdns-lmdb
+                region: garage
+                # Lightning Stream 0.6.0 has no *_filename options; credentials
+                # are injected via env vars (see lightningstream container in
+                # deploymentAuth) and substituted by os.ExpandEnv when the
+                # config is loaded. Bare $VAR (no braces) is intentional: KRO
+                # parses any dollar-brace sequence anywhere in the string
+                # (including YAML comments) as a CEL expression and would
+                # reject the RGD. os.ExpandEnv accepts $VAR without braces.
+                access_key: $LIGHTNINGSTREAM_S3_ACCESS_KEY
+                secret_key: $LIGHTNINGSTREAM_S3_SECRET_KEY
+                init_timeout: 120s
+
+            lmdb_poll_interval: 1s
+            storage_poll_interval: 1s
+
+    - id: configmapRecursorConfig
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: pdns-recursor-config
+          namespace: ${targetNamespace.metadata.name}
+        data:
+          recursor.conf: |
+            local-address=0.0.0.0
+            local-port=53
+
+            allow-from=0.0.0.0/0,::/0
+
+            # Upstream resolvers for external (non-local) domains
+            forward-zones-recurse=.=1.1.1.1;8.8.8.8
+
+            # Forward local zones to the Authoritative Server in the same instance namespace.
+            # The deployment entrypoint replaces this placeholder with the Kubernetes
+            # Service IP from PDNS_AUTH_SERVICE_HOST before Recursor starts.
+            forward-zones=intern.example.com=__PDNS_AUTH_SERVICE_HOST__:53
+            forward-zones+=example.local=__PDNS_AUTH_SERVICE_HOST__:53
+
+            webserver=yes
+            webserver-address=0.0.0.0
+            webserver-port=8082
+            webserver-allow-from=0.0.0.0/0,::/0
+
+            socket-dir=/run/pdns-recursor
+
+    - id: configmapDnsdistConfig
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: dnsdist-config
+          namespace: ${targetNamespace.metadata.name}
+        data:
+          dnsdist.conf: |
+            addLocal("0.0.0.0:53")
+
+            local recursor = os.getenv("PDNS_RECURSOR_SERVICE_HOST")
+            if recursor == nil then
+              error("PDNS_RECURSOR_SERVICE_HOST is not set")
+            end
+            newServer({address=recursor .. ":53", pool="recursor", name="pdns-recursor"})
+
+            local auth = os.getenv("PDNS_AUTH_SERVICE_HOST")
+            if auth == nil then
+              error("PDNS_AUTH_SERVICE_HOST is not set")
+            end
+            newServer({address=auth .. ":53", pool="auth", name="pdns-auth"})
+
+            -- Abuse mitigation and backend protection
+            -- (evaluated top-to-bottom; first match wins, before the routing rules).
+            --
+            -- 1. Global query-rate safety valve: shed traffic exceeding a coarse
+            --    ceiling to protect the Recursor/Auth backends. MaxQPSRule matches the
+            --    traffic *within* the limit, so it is wrapped in NotRule to drop the
+            --    excess. Tune DNSDIST_MAX_QPS to backend capacity, or 0 to disable.
+            local maxQPS = tonumber(os.getenv("DNSDIST_MAX_QPS")) or 1000
+            if maxQPS > 0 then
+              addAction(NotRule(MaxQPSRule(maxQPS)), DropAction())
+            end
+
+            -- 2. Per-client rate limit (defense-in-depth, opt-in). Effective ONLY when
+            --    dnsdist sees the real client source address (client-IP preservation at
+            --    the LoadBalancer). Under the default SNAT behaviour all clients share
+            --    one source address, so it is left disabled by default. Set
+            --    DNSDIST_MAX_QPS_PER_CLIENT > 0 once client-IP preservation is in place.
+            local maxQPSPerClient = tonumber(os.getenv("DNSDIST_MAX_QPS_PER_CLIENT")) or 0
+            if maxQPSPerClient > 0 then
+              addAction(MaxQPSIPRule(maxQPSPerClient), DropAction())
+            end
+
+            -- 3. Anti-amplification: answer UDP ANY queries with a truncated (TC=1)
+            --    response so legitimate clients retry over TCP, while spoofed-source UDP
+            --    reflection attempts receive only a small truncated reply. The
+            --    TCPRule(false) guard avoids truncating clients already using TCP.
+            addAction(AndRule({QTypeRule(DNSQType.ANY), TCPRule(false)}), TCAction())
+
+            -- Routing rules (evaluated after the controls above; first match wins)
+            addAction(RDRule(), PoolAction("recursor"))
+            addAction(AllRule(), PoolAction("auth"))
+
+    - id: pvcAuthData
+      template:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: pdns-auth-data
+          namespace: ${targetNamespace.metadata.name}
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+
+    # =========================================================================
+    # Layer 5 — Garage S3 store (multi-instance only)
+    # Deployed in parallel with the auth stack. Lightning Stream in the auth
+    # Deployment will wait for Garage to be reachable before syncing.
+    #
+    # The Garage pod bootstraps its single-node layout, S3 key, and bucket via
+    # an in-pod sidecar that drives the admin HTTP API on 127.0.0.1:3903, so
+    # the generated stack is self-contained for validation. (A postStart hook
+    # cannot be used: the dxflrs/garage image is FROM scratch and has no
+    # shell.)
+    # =========================================================================
+    - id: configmapGarage
+      includeWhen:
+        - ${schema.spec.multiInstance}
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: garage-config
+          namespace: ${targetNamespace.metadata.name}
+        data:
+          garage.toml: |
+            metadata_dir = "/var/lib/garage/meta"
+            data_dir = "/var/lib/garage/data"
+            db_engine = "lmdb"
+
+            replication_factor = 1
+            rpc_bind_addr = "[::]:3901"
+            rpc_public_addr = "127.0.0.1:3901"
+            rpc_secret_file = "/etc/garage-credentials/rpc-secret"
+
+            [s3_api]
+            s3_region = "garage"
+            api_bind_addr = "0.0.0.0:3900"
+            root_domain = ".s3.garage.localhost"
+
+            [s3_web]
+            bind_addr = "0.0.0.0:3902"
+            root_domain = ".web.garage.localhost"
+            index = "index.html"
+
+            [admin]
+            api_bind_addr = "0.0.0.0:3903"
+            admin_token_file = "/etc/garage-credentials/admin-token"
+            metrics_token_file = "/etc/garage-credentials/metrics-token"
+
+    - id: serviceGarage
+      includeWhen:
+        - ${schema.spec.multiInstance}
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: garage
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: garage
+            app.kubernetes.io/component: s3-store
+        spec:
+          type: ClusterIP
+          selector:
+            app.kubernetes.io/name: garage
+          ports:
+            - name: s3
+              port: 3900
+              targetPort: s3
+              protocol: TCP
+            - name: rpc
+              port: 3901
+              targetPort: rpc
+              protocol: TCP
+
+    - id: deploymentGarage
+      includeWhen:
+        - ${schema.spec.multiInstance}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: garage
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: garage
+            app.kubernetes.io/component: s3-store
+        spec:
+          replicas: 1
+          strategy:
+            type: Recreate
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: garage
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/name: garage
+                app.kubernetes.io/component: s3-store
+            spec:
+              automountServiceAccountToken: false
+              securityContext:
+                # garage (FROM scratch) and the alpine bootstrap sidecar run as
+                # root and write to the meta/data volumes; neither image has a
+                # non-root user. Documented Baseline exception. The RuntimeDefault
+                # seccomp profile is still applied (compatible with root).
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                # Garage S3 daemon.
+                #
+                # The dxflrs/garage image is FROM scratch and contains only the
+                # statically-linked garage binary — no /bin/sh, no coreutils.
+                # That rules out any lifecycle.postStart hook (kubelet cannot
+                # exec a shell inside the container). Cluster bootstrap is
+                # therefore done by the `bootstrap` sidecar below, which drives
+                # the Garage admin HTTP API on 127.0.0.1:3903.
+                - name: garage
+                  image: dxflrs/garage:v1.0.1@sha256:a5706cf1f3d7b349ac5133ec59ad8181b709270b75e5f2fa7b3e1a5c07d67137
+                  env:
+                    - name: GARAGE_CONFIG_FILE
+                      value: /etc/garage/garage.toml
+                  ports:
+                    - name: s3
+                      containerPort: 3900
+                      protocol: TCP
+                    - name: rpc
+                      containerPort: 3901
+                      protocol: TCP
+                  volumeMounts:
+                    - name: config
+                      mountPath: /etc/garage
+                      readOnly: true
+                    - name: credentials
+                      mountPath: /etc/garage-credentials
+                      readOnly: true
+                    - name: meta
+                      mountPath: /var/lib/garage/meta
+                    - name: data
+                      mountPath: /var/lib/garage/data
+                  readinessProbe:
+                    tcpSocket:
+                      port: s3
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
+                    timeoutSeconds: 3
+                    failureThreshold: 12
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 64Mi
+                    limits:
+                      cpu: 500m
+                      memory: 256Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+                # Bootstrap sidecar.
+                #
+                # Drives the garage admin API at 127.0.0.1:3903 to:
+                #   1. assign a single-node layout (zone=default, capacity=1GB)
+                #   2. import the deterministic Lightning Stream S3 key
+                #   3. create the pdns-lmdb bucket
+                #   4. grant the key read+write+owner on that bucket
+                # All steps are idempotent and safe across Pod restarts.
+                # After bootstrap completes, the sidecar touches a sentinel file
+                # and sleeps forever; its readiness probe gates Pod readiness so
+                # the Deployment is only Available once bootstrap has succeeded.
+                - name: bootstrap
+                  image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+                  command:
+                    - /bin/sh
+                    - -ec
+                    - |
+                      apk add --no-cache curl jq >/dev/null
+
+                      ADMIN_TOKEN="$(cat /etc/garage-credentials/admin-token)"
+                      ACCESS_KEY="$(cat /etc/garage-credentials/s3-access-key)"
+                      SECRET_KEY="$(cat /etc/garage-credentials/s3-secret-key)"
+                      API="http://127.0.0.1:3903"
+                      AUTH="Authorization: Bearer $ADMIN_TOKEN"
+
+                      log() { echo "[bootstrap] $*"; }
+
+                      log "waiting for garage admin API on $API/health"
+                      attempt=0
+                      until curl -fsS -H "$AUTH" "$API/health" >/dev/null 2>&1; do
+                        attempt=$((attempt + 1))
+                        if [ "$attempt" -ge 120 ]; then
+                          log "ERROR: garage admin API never became reachable"
+                          exit 1
+                        fi
+                        sleep 1
+                      done
+                      log "garage admin API reachable after $attempt s"
+
+                      status="$(curl -fsS -H "$AUTH" "$API/v1/status")"
+                      node_id="$(printf '%s' "$status" | jq -r '.node')"
+                      layout_version="$(printf '%s' "$status" | jq '.layoutVersion')"
+                      case "$layout_version" in
+                        ''|null) layout_version=0 ;;
+                      esac
+                      log "node id $node_id, current layout version $layout_version"
+
+                      if [ "$layout_version" -eq 0 ]; then
+                        log "staging single-node layout (zone=default, capacity=1GB)"
+                        body="$(jq -nc --arg id "$node_id" \
+                          '[{id:$id,zone:"default",capacity:1000000000,tags:[]}]')"
+                        curl -fsS -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+                          -d "$body" "$API/v1/layout" >/dev/null
+                        log "applying layout version 1"
+                        curl -fsS -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+                          -d '{"version":1}' "$API/v1/layout/apply" >/dev/null
+                        log "waiting for layout to take effect"
+                        for _ in $(seq 1 30); do
+                          new_v="$(curl -fsS -H "$AUTH" "$API/v1/status" | jq '.layoutVersion')"
+                          [ "$new_v" = "1" ] && break
+                          sleep 1
+                        done
+                      else
+                        log "layout already at version $layout_version; skipping"
+                      fi
+
+                      key_code="$(curl -s -o /dev/null -w '%{http_code}' \
+                        -H "$AUTH" "$API/v1/key?id=$ACCESS_KEY")"
+                      if [ "$key_code" = "200" ]; then
+                        log "s3 key already imported; skipping"
+                      else
+                        log "importing s3 key (id+secret redacted; GET returned $key_code)"
+                        body="$(jq -nc --arg n lightningstream \
+                                       --arg a "$ACCESS_KEY" \
+                                       --arg s "$SECRET_KEY" \
+                          '{name:$n,accessKeyId:$a,secretAccessKey:$s}')"
+                        if ! curl -fsS -X POST -H "$AUTH" \
+                             -H 'Content-Type: application/json' \
+                             -d "$body" "$API/v1/key/import" >/dev/null; then
+                          log "ERROR: s3 key import failed"
+                          exit 1
+                        fi
+                      fi
+
+                      bucket_code="$(curl -s -o /tmp/bucket.json -w '%{http_code}' \
+                        -H "$AUTH" "$API/v1/bucket?globalAlias=pdns-lmdb")"
+                      if [ "$bucket_code" = "200" ]; then
+                        log "bucket pdns-lmdb already exists"
+                      else
+                        log "creating bucket pdns-lmdb (GET returned $bucket_code)"
+                        if ! curl -fsS -X POST -H "$AUTH" \
+                             -H 'Content-Type: application/json' \
+                             -d '{"globalAlias":"pdns-lmdb"}' \
+                             "$API/v1/bucket" -o /tmp/bucket.json; then
+                          log "ERROR: bucket creation failed"
+                          exit 1
+                        fi
+                      fi
+                      bucket_id="$(jq -r '.id' /tmp/bucket.json)"
+                      log "bucket id $bucket_id"
+
+                      log "granting key read+write+owner on bucket pdns-lmdb"
+                      body="$(jq -nc --arg b "$bucket_id" --arg k "$ACCESS_KEY" \
+                        '{bucketId:$b,accessKeyId:$k,permissions:{read:true,write:true,owner:true}}')"
+                      if ! curl -fsS -X POST -H "$AUTH" \
+                           -H 'Content-Type: application/json' \
+                           -d "$body" "$API/v1/bucket/allow" >/dev/null; then
+                        log "ERROR: bucket/allow failed"
+                        exit 1
+                      fi
+
+                      log "bootstrap complete"
+                      touch /tmp/bootstrap-done
+                      exec sleep infinity
+                  volumeMounts:
+                    - name: credentials
+                      mountPath: /etc/garage-credentials
+                      readOnly: true
+                  readinessProbe:
+                    exec:
+                      command:
+                        - /bin/sh
+                        - -c
+                        - test -f /tmp/bootstrap-done
+                    initialDelaySeconds: 2
+                    periodSeconds: 5
+                    timeoutSeconds: 3
+                    failureThreshold: 60
+                  resources:
+                    requests:
+                      cpu: 10m
+                      memory: 32Mi
+                    limits:
+                      cpu: 100m
+                      memory: 64Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+              volumes:
+                - name: config
+                  configMap:
+                    name: ${configmapGarage.metadata.name}
+                - name: credentials
+                  secret:
+                    secretName: ${secretReplicationCredentials.metadata.name}
+                    # Garage refuses to start if its rpc-secret file is world-readable.
+                    # 256 = 0o400 (owner read-only).
+                    defaultMode: 256
+                - name: meta
+                  emptyDir: {}
+                - name: data
+                  emptyDir: {}
+      readyWhen:
+        - ${deploymentGarage.status.availableReplicas >= 1}
+
+    # =========================================================================
+    # Layer 6 — Authoritative Server
+    # pdns-auth Deployment depends on:
+    #   configmapAuthConfig, pvcAuthData (explicit CEL refs → implicit deps)
+    #   lightningstream-config (by name — created before auth in the same layer)
+    # =========================================================================
+    - id: serviceAuth
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: pdns-auth
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: dns-authoritative
+            app.kubernetes.io/component: dns-authoritative
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/path: /metrics
+            prometheus.io/port: "8081"
+        spec:
+          type: ClusterIP
+          selector:
+            app.kubernetes.io/name: pdns-auth
+          ports:
+            - name: dns-udp
+              port: 53
+              targetPort: dns-udp
+              protocol: UDP
+            - name: dns-tcp
+              port: 53
+              targetPort: dns-tcp
+              protocol: TCP
+            - name: api
+              port: 8081
+              targetPort: api
+              protocol: TCP
+
+    - id: deploymentAuth
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: pdns-auth
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-auth
+            app.kubernetes.io/component: dns-auth
+        spec:
+          replicas: 1
+          strategy:
+            type: Recreate
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: pdns-auth
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/name: pdns-auth
+                app.kubernetes.io/component: dns-auth
+            spec:
+              automountServiceAccountToken: false
+              securityContext:
+                fsGroup: 953
+                fsGroupChangePolicy: OnRootMismatch
+                seccompProfile:
+                  type: RuntimeDefault
+              initContainers:
+                - name: repair-lmdb-permissions
+                  image: powerdns/lightningstream:1.0.2@sha256:31acb91faadda5ddb5fc03073cd464cecbce7be0f752d70a39ef2ebb0065539f
+                  command:
+                    - /bin/sh
+                    - -c
+                  args:
+                    - chown -R 953:953 /var/lib/powerdns
+                  volumeMounts:
+                    - name: data
+                      mountPath: /var/lib/powerdns
+                  securityContext:
+                    runAsUser: 0
+                    runAsGroup: 0
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+                      add:
+                        - CHOWN
+              affinity:
+                podAntiAffinity:
+                  preferredDuringSchedulingIgnoredDuringExecution:
+                    - weight: 100
+                      podAffinityTerm:
+                        labelSelector:
+                          matchLabels:
+                            app.kubernetes.io/name: pdns-auth
+                        topologyKey: kubernetes.io/hostname
+              containers:
+                - name: pdns-auth
+                  image: powerdns/pdns-auth-49:4.9.16@sha256:272fe174990ce108461ed3e953b43691509cdcfb138d8c7c61f64d7a61b8e6ad
+                  ports:
+                    - name: dns-udp
+                      containerPort: 53
+                      protocol: UDP
+                    - name: dns-tcp
+                      containerPort: 53
+                      protocol: TCP
+                    - name: api
+                      containerPort: 8081
+                      protocol: TCP
+                  volumeMounts:
+                    - name: config
+                      mountPath: /etc/powerdns
+                      readOnly: true
+                    - name: data
+                      mountPath: /var/lib/powerdns
+                    - name: run
+                      mountPath: /run/pdns-auth
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 64Mi
+                    limits:
+                      cpu: 500m
+                      memory: 256Mi
+                  securityContext:
+                    runAsUser: 953
+                    runAsGroup: 953
+                    runAsNonRoot: true
+                    readOnlyRootFilesystem: true
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+                      add:
+                        - NET_BIND_SERVICE
+                  livenessProbe:
+                    tcpSocket:
+                      port: dns-tcp
+                    initialDelaySeconds: 10
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+                  readinessProbe:
+                    httpGet:
+                      path: /api/v1/servers/localhost
+                      port: api
+                      httpHeaders:
+                        - name: X-API-Key
+                          value: "${schema.spec.pdnsApiKey}"
+                    initialDelaySeconds: 10
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+
+                - name: lightningstream
+                  image: powerdns/lightningstream:1.0.2@sha256:31acb91faadda5ddb5fc03073cd464cecbce7be0f752d70a39ef2ebb0065539f
+                  args:
+                    - sync
+                    - --config
+                    - /etc/lightningstream/lightningstream.yaml
+                    - --instance
+                    - $(POD_NAME)
+                  env:
+                    - name: POD_NAME
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: metadata.name
+                    # S3 credentials for the lightningstream config; referenced
+                    # via ${LIGHTNINGSTREAM_S3_*} in lightningstream.yaml and
+                    # expanded at config-load time. Unused in fs-storage mode
+                    # but harmless to define.
+                    - name: LIGHTNINGSTREAM_S3_ACCESS_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${secretReplicationCredentials.metadata.name}
+                          key: s3-access-key
+                    - name: LIGHTNINGSTREAM_S3_SECRET_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${secretReplicationCredentials.metadata.name}
+                          key: s3-secret-key
+                  volumeMounts:
+                    - name: lightningstream-config
+                      mountPath: /etc/lightningstream
+                      readOnly: true
+                    - name: data
+                      mountPath: /var/lib/powerdns
+                  resources:
+                    requests:
+                      cpu: 10m
+                      memory: 32Mi
+                    limits:
+                      cpu: 100m
+                      memory: 128Mi
+                  securityContext:
+                    runAsUser: 953
+                    runAsGroup: 953
+                    runAsNonRoot: true
+                    readOnlyRootFilesystem: true
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+                  # livenessProbe / readinessProbe: not applicable — sidecar exposes no health endpoint
+
+              volumes:
+                - name: config
+                  configMap:
+                    name: ${configmapAuthConfig.metadata.name}
+                - name: lightningstream-config
+                  configMap:
+                    # Both configmapLightningStreamFS and configmapLightningStreamS3
+                    # resolve to the same name "lightningstream-config"; KRO's
+                    # includeWhen ensures exactly one is created.
+                    name: lightningstream-config
+                - name: data
+                  persistentVolumeClaim:
+                    claimName: ${pvcAuthData.metadata.name}
+                - name: run
+                  emptyDir: {}
+      readyWhen:
+        - ${deploymentAuth.status.availableReplicas >= 1}
+
+    # =========================================================================
+    # Layer 7 — Recursor
+    # deploymentRecursor references deploymentAuth (implicit dependency).
+    # =========================================================================
+    - id: serviceRecursor
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: pdns-recursor
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-recursor
+            app.kubernetes.io/component: dns-recursor
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/path: /metrics
+            prometheus.io/port: "8082"
+        spec:
+          type: ClusterIP
+          selector:
+            app.kubernetes.io/name: pdns-recursor
+          ports:
+            - name: dns-udp
+              port: 53
+              targetPort: dns-udp
+              protocol: UDP
+            - name: dns-tcp
+              port: 53
+              targetPort: dns-tcp
+              protocol: TCP
+            - name: metrics
+              port: 8082
+              targetPort: metrics
+              protocol: TCP
+
+    - id: deploymentRecursor
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: pdns-recursor
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-recursor
+            app.kubernetes.io/component: dns-recursor
+          annotations:
+            # Depend on auth being available so the recursor's forward-zones target exists.
+            kro.run/depends-on: ${deploymentAuth.metadata.name}
+        spec:
+          replicas: 1
+          strategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxSurge: 1
+              maxUnavailable: 0
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: pdns-recursor
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/name: pdns-recursor
+                app.kubernetes.io/component: dns-recursor
+            spec:
+              automountServiceAccountToken: false
+              securityContext:
+                # Image default user is "pdns" (uid/gid 953); pin it numerically
+                # so the kubelet can enforce runAsNonRoot. Port 53 is bound via
+                # the NET_BIND_SERVICE capability on the container below.
+                runAsUser: 953
+                runAsGroup: 953
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              affinity:
+                podAntiAffinity:
+                  preferredDuringSchedulingIgnoredDuringExecution:
+                    - weight: 100
+                      podAffinityTerm:
+                        labelSelector:
+                          matchLabels:
+                            app.kubernetes.io/name: pdns-recursor
+                        topologyKey: kubernetes.io/hostname
+              containers:
+                - name: pdns-recursor
+                  image: powerdns/pdns-recursor-52:5.2.11@sha256:f2eb999df70d6035898aa6e4c427199fa3c1bcad6a53adc41cab7603e4e121cd
+                  command:
+                    - /bin/sh
+                    - -ec
+                  args:
+                    - |
+                      if [ -z "$PDNS_AUTH_SERVICE_HOST" ]; then
+                        echo "PDNS_AUTH_SERVICE_HOST is not set" >&2
+                        exit 1
+                      fi
+                      sed "s/__PDNS_AUTH_SERVICE_HOST__/$PDNS_AUTH_SERVICE_HOST/g" \
+                        /etc/pdns-recursor-template/recursor.conf > /etc/pdns-recursor/recursor.conf
+                      exec pdns_recursor --enable-old-settings --config-dir=/etc/pdns-recursor
+                  ports:
+                    - name: dns-udp
+                      containerPort: 53
+                      protocol: UDP
+                    - name: dns-tcp
+                      containerPort: 53
+                      protocol: TCP
+                    - name: metrics
+                      containerPort: 8082
+                      protocol: TCP
+                  volumeMounts:
+                    - name: config
+                      mountPath: /etc/pdns-recursor-template
+                      readOnly: true
+                    - name: generated-config
+                      mountPath: /etc/pdns-recursor
+                    - name: run
+                      mountPath: /run/pdns-recursor
+                  resources:
+                    requests:
+                      cpu: 100m
+                      memory: 128Mi
+                    limits:
+                      cpu: 500m
+                      memory: 256Mi
+                  securityContext:
+                    readOnlyRootFilesystem: true
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+                      add:
+                        - NET_BIND_SERVICE
+                  livenessProbe:
+                    tcpSocket:
+                      port: dns-tcp
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+                  readinessProbe:
+                    tcpSocket:
+                      port: dns-tcp
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+              volumes:
+                - name: config
+                  configMap:
+                    name: ${configmapRecursorConfig.metadata.name}
+                - name: generated-config
+                  emptyDir: {}
+                - name: run
+                  emptyDir: {}
+      readyWhen:
+        - ${deploymentRecursor.status.availableReplicas >= 1}
+
+    # =========================================================================
+    # Layer 8 — dnsdist (DNS frontend)
+    # deploymentDnsdist references deploymentRecursor (implicit dependency).
+    # =========================================================================
+    - id: serviceDnsdist
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: dnsdist
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: dnsdist
+            app.kubernetes.io/component: dns-frontend
+        spec:
+          type: LoadBalancer
+          selector:
+            app.kubernetes.io/name: dnsdist
+          ports:
+            - name: dns-udp
+              port: 53
+              targetPort: dns-udp
+              protocol: UDP
+            - name: dns-tcp
+              port: 53
+              targetPort: dns-tcp
+              protocol: TCP
+
+    - id: deploymentDnsdist
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: dnsdist
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: dnsdist
+            app.kubernetes.io/component: dns-frontend
+          annotations:
+            kro.run/depends-on: ${deploymentRecursor.metadata.name}
+        spec:
+          replicas: 1
+          strategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxSurge: 1
+              maxUnavailable: 0
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: dnsdist
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/name: dnsdist
+                app.kubernetes.io/component: dns-frontend
+            spec:
+              automountServiceAccountToken: false
+              securityContext:
+                # Image default user is "pdns" (uid/gid 953); pin it numerically
+                # so the kubelet can enforce runAsNonRoot. Port 53 is bound via
+                # the NET_BIND_SERVICE capability on the container below.
+                runAsUser: 953
+                runAsGroup: 953
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              containers:
+                - name: dnsdist
+                  image: powerdns/dnsdist-19:1.9.16@sha256:260b1120947a10c494fad4d93cde33ebace34bf4800c88ebb114dd7f9e829809
+                  args:
+                    - --config
+                    - /etc/dnsdist/dnsdist.conf
+                  ports:
+                    - name: dns-udp
+                      containerPort: 53
+                      protocol: UDP
+                    - name: dns-tcp
+                      containerPort: 53
+                      protocol: TCP
+                    - name: console
+                      containerPort: 5199
+                      protocol: TCP
+                  volumeMounts:
+                    - name: config
+                      mountPath: /etc/dnsdist
+                      readOnly: true
+                  resources:
+                    requests:
+                      cpu: 50m
+                      memory: 64Mi
+                    limits:
+                      cpu: 500m
+                      memory: 128Mi
+                  securityContext:
+                    readOnlyRootFilesystem: true
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+                      add:
+                        - NET_BIND_SERVICE
+                  livenessProbe:
+                    tcpSocket:
+                      port: dns-tcp
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+                  readinessProbe:
+                    tcpSocket:
+                      port: dns-tcp
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+              volumes:
+                - name: config
+                  configMap:
+                    name: ${configmapDnsdistConfig.metadata.name}
+      readyWhen:
+        - ${deploymentDnsdist.status.availableReplicas >= 1}
+
+    # =========================================================================
+    # Layer 9 — PowerDNS Operator
+    # Final resource; depends on RBAC (serviceAccount, roleBinding, clusterRoleBinding),
+    # secretApiKey, and deploymentAuth being ready (pdns-auth API reachable).
+    # =========================================================================
+    - id: serviceOperatorMetrics
+      template:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: pdns-operator-metrics
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-operator
+            app.kubernetes.io/component: dns-operator
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/path: /metrics
+            prometheus.io/port: "8080"
+        spec:
+          type: ClusterIP
+          selector:
+            app.kubernetes.io/name: pdns-operator
+          ports:
+            - name: metrics
+              port: 8080
+              targetPort: metrics
+              protocol: TCP
+
+    - id: deploymentOperator
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: pdns-operator
+          namespace: ${targetNamespace.metadata.name}
+          labels:
+            app.kubernetes.io/name: pdns-operator
+            app.kubernetes.io/component: dns-operator
+          annotations:
+            powerdns.dev/auth-available-replicas: "${string(deploymentAuth.status.availableReplicas)}"
+        spec:
+          replicas: 1
+          strategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxSurge: 1
+              maxUnavailable: 0
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: pdns-operator
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/name: pdns-operator
+                app.kubernetes.io/component: dns-operator
+            spec:
+              serviceAccountName: ${serviceAccount.metadata.name}
+              securityContext:
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              terminationGracePeriodSeconds: 10
+              containers:
+                - name: manager
+                  image: ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7
+                  args:
+                    - --leader-elect
+                    - --metrics-bind-address=:8080
+                  env:
+                    - name: WATCH_NAMESPACE
+                      value: ${targetNamespace.metadata.name}
+                    - name: PDNS_API_URL
+                      value: "http://${serviceAuth.metadata.name}.${targetNamespace.metadata.name}.svc.cluster.local:8081"
+                    - name: PDNS_API_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${secretApiKey.metadata.name}
+                          key: api-key
+                  ports:
+                    - name: metrics
+                      containerPort: 8080
+                      protocol: TCP
+                    - name: health
+                      containerPort: 8081
+                      protocol: TCP
+                  resources:
+                    requests:
+                      cpu: 10m
+                      memory: 64Mi
+                    limits:
+                      cpu: 200m
+                      memory: 128Mi
+                  securityContext:
+                    readOnlyRootFilesystem: true
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+                  livenessProbe:
+                    httpGet:
+                      path: /healthz
+                      port: health
+                    initialDelaySeconds: 15
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+                  readinessProbe:
+                    httpGet:
+                      path: /readyz
+                      port: health
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+      readyWhen:
+        - ${deploymentOperator.status.availableReplicas >= 1}

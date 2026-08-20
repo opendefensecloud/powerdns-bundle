@@ -1,0 +1,31 @@
+# PowerDNSInstance — Single-instance reference scenario
+#
+# Deploys one complete DNS stack (dnsdist + recursor + authoritative + operator)
+# in namespace "dns" with filesystem-backed Lightning Stream replication (single node).
+#
+# Prerequisites:
+#   kubectl apply -f deploy/kro/powerdns-instance-rgd.yaml
+#
+# Apply:
+#   kubectl apply -f deploy/kro/powerdns-instance-example.yaml
+#
+# Verify:
+#   kubectl get powerdnsinstance dns-reference
+#   kubectl -n dns get pods
+#   kubectl -n dns get deployments
+#
+# Create a test zone:
+#   kubectl -n dns apply -f deploy/examples/zone-reference-scenario.yaml
+#
+# Query DNS (once LoadBalancer IP is assigned):
+#   dig @<EXTERNAL-IP> intern.example.com SOA
+
+apiVersion: kro.run/v1alpha1
+kind: PowerDNSInstance
+metadata:
+  name: dns-reference
+  namespace: default
+spec:
+  namespace: dns
+  pdnsApiKey: changeme
+  multiInstance: false

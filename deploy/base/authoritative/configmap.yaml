@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pdns-auth-config
+  namespace: dns
+data:
+  pdns.conf: |
+    launch=lmdb
+    lmdb-filename=/var/lib/powerdns/pdns.lmdb
+    # Required for Lightning Stream compatibility; PowerDNS 4.9 removed the
+    # previous mapasync sync mode and requires a single shard in this mode.
+    lmdb-lightning-stream=yes
+    lmdb-shards=1
+    # Match Lightning Stream's LMDB map_size so both processes can open the same environment.
+    lmdb-map-size=1000
+
+    # API Configuration
+    # Enabling the HTTP API allows the PowerDNS Operator to manage zones and records.
+    api=yes
+    # SUGGESTION: Move api-key to a Kubernetes Secret and inject via ENV or volume.
+    api-key=changeme
+
+    # Webserver Configuration
+    # The webserver provides the endpoint for the HTTP API.
+    webserver=yes
+    webserver-address=0.0.0.0
+    webserver-port=8081
+    # Allow connections from any pod in the cluster; tighten to the pod CIDR in production.
+    webserver-allow-from=0.0.0.0/0,::/0
+
+    # Runtime directories
+    # With readOnlyRootFilesystem the default /var/run is not writable.
+    socket-dir=/run/pdns-auth

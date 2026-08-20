@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pdns-operator
+  namespace: dns
+  labels:
+    app.kubernetes.io/name: pdns-operator
+    app.kubernetes.io/component: dns-operator
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pdns-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pdns-operator
+        app.kubernetes.io/component: dns-operator
+    spec:
+      serviceAccountName: pdns-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: manager
+          image: ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7
+          args:
+            - --leader-elect
+            - --metrics-bind-address=:8080
+          env:
+            - name: PDNS_API_URL
+              value: "http://pdns-auth:8081"
+            - name: PDNS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pdns-operator-api-key
+                  key: api-key
+            # Scope the manager cache to the operator's own namespace so the
+            # ServiceAccount's namespaced grants are the effective ceiling
+            # even if a cluster-wide ClusterRole is ever added later.
+            - name: WATCH_NAMESPACE
+              value: "dns"
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3

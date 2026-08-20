@@ -1,0 +1,881 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      checkout_ref:
+        description: "Optional ref or SHA to checkout"
+        type: string
+        default: ""
+      run_ocm_bundle:
+        description: "Bundle image blobs into the OCM CTF archive"
+        type: boolean
+        default: false
+      run_deploy:
+        description: "Run deployment and smoke tests when cluster authentication is configured"
+        type: boolean
+        default: true
+      deploy_source:
+        description: "Manifest source for deploy/smoke: 'package' (extract from the built OCM CTF, default) or 'source' (deploy/ tree break-glass)"
+        type: choice
+        options:
+          - package
+          - source
+        default: package
+      run_cve_scan:
+        description: "Run Trivy CVE/config scans and per-image SBOM generation (image-matrix, cve-scan, config-scan, image-sbom)"
+        type: boolean
+        default: true
+      validation_suites:
+        description: "Comma-separated allow-list of cluster validation suites (operator,lmdb,replication,observability,health-probes,rolling-update,network-policies,multi-instance). 'all' or empty runs everything."
+        type: string
+        default: ""
+      run_upgrade:
+        description: "Run the version upgrade smoke test (build baseline+candidate packages and upgrade in the cluster)"
+        type: boolean
+        default: false
+
+concurrency:
+  # Cancel superseded runs on the same ref (e.g. rapid PR pushes) to save runner
+  # time. Gated to pull_request so push-to-main and workflow_dispatch runs — which
+  # deploy to the shared reference cluster — are never cancelled mid-deploy.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  ACTIONLINT_VERSION: "1.7.7"
+  GITLEAKS_VERSION: "8.30.1"
+  KUBECONFORM_VERSION: "0.6.7"
+  KUBECTL_VERSION: "1.32.0"
+  KUSTOMIZE_VERSION: "5.7.1"
+  OCM_CLI_VERSION: "v0.39.0"
+  PROMETHEUS_OPERATOR_VERSION: "0.91.0"
+  SYFT_VERSION: "1.42.4"
+
+jobs:
+  params:
+    name: "0. Resolve pipeline parameters"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run_cve_scan: ${{ steps.resolve.outputs.run_cve_scan }}
+      run_observability: ${{ steps.resolve.outputs.run_observability }}
+      validation_suites: ${{ steps.resolve.outputs.validation_suites }}
+      run_upgrade: ${{ steps.resolve.outputs.run_upgrade }}
+    steps:
+      - id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_RUN_CVE_SCAN: ${{ inputs.run_cve_scan }}
+          INPUT_VALIDATION_SUITES: ${{ inputs.validation_suites }}
+          INPUT_RUN_UPGRADE: ${{ inputs.run_upgrade }}
+          VAR_RUN_CVE_SCAN: ${{ vars.RUN_CVE_SCAN }}
+          VAR_VALIDATION_SUITES: ${{ vars.VALIDATION_SUITES }}
+          VAR_RUN_UPGRADE_SMOKE: ${{ vars.RUN_UPGRADE_SMOKE }}
+        run: |
+          set -euo pipefail
+
+          # Precedence: workflow_dispatch input > repo variable > default.
+          # `run_upgrade` resolves from a repo variable on pull_request events,
+          # because workflow_dispatch inputs are unavailable there (and the EKS
+          # OIDC trust policy only permits cluster access on pull_request).
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            run_cve_scan="$INPUT_RUN_CVE_SCAN"
+            validation_suites="$INPUT_VALIDATION_SUITES"
+            run_upgrade="$INPUT_RUN_UPGRADE"
+          else
+            run_cve_scan="${VAR_RUN_CVE_SCAN:-true}"
+            validation_suites="${VAR_VALIDATION_SUITES:-}"
+            run_upgrade="${VAR_RUN_UPGRADE_SMOKE:-false}"
+          fi
+          [ -z "$run_cve_scan" ] && run_cve_scan="true"
+          [ -z "$run_upgrade" ] && run_upgrade="false"
+
+          normalized_suites="$(printf '%s' "$validation_suites" | tr -d '[:space:]')"
+          if [ -z "$normalized_suites" ] || [ "$normalized_suites" = "all" ]; then
+            run_observability="true"
+          else
+            case ",${normalized_suites}," in
+              *,observability,*) run_observability="true" ;;
+              *) run_observability="false" ;;
+            esac
+          fi
+
+          {
+            echo "run_cve_scan=${run_cve_scan}"
+            echo "run_observability=${run_observability}"
+            echo "validation_suites=${validation_suites}"
+            echo "run_upgrade=${run_upgrade}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Pipeline parameters"
+            echo "| Knob | Value |"
+            echo "| :--- | :--- |"
+            echo "| run_cve_scan | \`${run_cve_scan}\` |"
+            echo "| run_observability | \`${run_observability}\` |"
+            echo "| validation_suites | \`${validation_suites:-all}\` |"
+            echo "| run_upgrade | \`${run_upgrade}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  quality:
+    name: "1. Quality checks"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
+
+      - name: Install validation tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends curl shellcheck tar yamllint
+
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin actionlint
+
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin kubeconform
+
+          curl -sSfL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin kustomize
+
+      - name: YAML lint
+        run: |
+          yamllint -d '{extends: default, rules: {line-length: {max: 220}, truthy: {check-keys: false}, document-start: disable, comments-indentation: disable, indentation: {indent-sequences: whatever}}}' \
+            .github/workflows deploy hack/ci ocm
+
+      - name: ShellCheck
+        run: shellcheck -S error hack/*.sh
+
+      - name: Observability manifest contract
+        run: bash hack/validate-observability-manifests.sh
+
+      - name: GitHub Actions lint
+        run: actionlint -color
+
+      - name: Workflow action compliance
+        run: bash hack/validate-github-actions.sh
+
+      - name: Secrets scan
+        run: |
+          set -euo pipefail
+          GITLEAKS_TARBALL="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${GITLEAKS_TARBALL}" -o "/tmp/${GITLEAKS_TARBALL}"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt" -o /tmp/gitleaks-checksums.txt
+          cd /tmp
+          grep "${GITLEAKS_TARBALL}" gitleaks-checksums.txt | sha256sum -c -
+          tar xzf "${GITLEAKS_TARBALL}" gitleaks
+          cd "$GITHUB_WORKSPACE"
+          /tmp/gitleaks dir . --redact -v
+
+      - name: Render Kubernetes manifests
+        run: |
+          set -euo pipefail
+          mkdir -p rendered
+          kustomize build deploy > rendered/deploy.yaml
+          kustomize build deploy/kro > rendered/kro.yaml
+          kustomize build deploy/overlays/monitoring > rendered/monitoring.yaml
+
+      - name: Validate rendered manifests
+        run: >-
+          kubeconform -strict -summary -ignore-missing-schemas
+          rendered/deploy.yaml rendered/kro.yaml rendered/monitoring.yaml
+          hack/ci/prometheus.yaml
+
+      - name: Validate image inventory
+        run: bash hack/validate-image-inventory.sh
+
+      - name: Validate air-gap localization
+        run: bash hack/validate-air-gap-localization.sh
+
+      - name: Add quality summary
+        if: always()
+        run: |
+          {
+            echo "### Quality checks"
+            echo "Static linting, workflow compliance, secret scanning, Kustomize rendering, Kubernetes schema validation, image-inventory consistency, and air-gap localization coverage completed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  ocm-package:
+    name: "2. Build OCM package"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: quality
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
+
+      - name: Setup OCM CLI
+        uses: open-component-model/ocm-setup-action@8c71929f38d3486e352e5d7aaf813f36accaaf43
+        with:
+          version: ${{ env.OCM_CLI_VERSION }}
+
+      - name: Install Syft
+        run: |
+          set -euo pipefail
+          SYFT_TARBALL="syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/${SYFT_TARBALL}" -o "/tmp/${SYFT_TARBALL}"
+          curl -sSfL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_checksums.txt" -o /tmp/syft-checksums.txt
+          cd /tmp
+          grep "${SYFT_TARBALL}" syft-checksums.txt | sha256sum -c -
+          tar xzf "${SYFT_TARBALL}" syft
+          sudo install -m 0755 /tmp/syft /usr/local/bin/syft
+
+      - name: Build component archive
+        run: make ocm-build
+
+      - name: Validate component archive
+        run: bash hack/validate-ocm-package.sh ocm/ctf.tar
+
+      - name: Bundle image resources
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ocm_bundle }}
+        run: make ocm-bundle
+
+      - name: Generate source SBOM and checksums
+        run: |
+          set -euo pipefail
+          syft dir:. -o cyclonedx-json=source-sbom.cdx.json
+          sha256sum ocm/ctf.tar > ocm/ctf.tar.sha256
+          if [ -f ocm/ctf-bundled.tar ]; then
+            sha256sum ocm/ctf-bundled.tar > ocm/ctf-bundled.tar.sha256
+          fi
+
+      - name: Upload OCM artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: ocm-package
+          path: |
+            ocm/ctf.tar
+            ocm/ctf.tar.sha256
+            ocm/ctf-bundled.tar
+            ocm/ctf-bundled.tar.sha256
+            source-sbom.cdx.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Add OCM summary
+        run: |
+          {
+            echo "### OCM package"
+            echo "| Artifact | Status |"
+            echo "| :--- | :--- |"
+            echo "| ocm/ctf.tar | built and validated |"
+            if [ -f ocm/ctf-bundled.tar ]; then
+              echo "| ocm/ctf-bundled.tar | bundled |"
+            else
+              echo "| ocm/ctf-bundled.tar | skipped for this run |"
+            fi
+            echo "| source-sbom.cdx.json | generated |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  image-matrix:
+    name: "3a. Prepare image scan matrix"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+      - params
+      - ocm-package
+    if: ${{ needs.params.outputs.run_cve_scan == 'true' }}
+    outputs:
+      images: ${{ steps.images.outputs.images }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
+
+      - id: images
+        name: Extract OCM image references
+        run: |
+          set -euo pipefail
+          images="$(bash hack/list-ocm-images.sh | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Container image scan set"
+            echo "$images" | jq -r '.[] | "- `" + . + "`"'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cve-scan:
+    name: "3b. CVE scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - params
+      - image-matrix
+    if: ${{ needs.params.outputs.run_cve_scan == 'true' }}
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.image-matrix.outputs.images) }}
+    env:
+      # Image CVE gate is BLOCKING (exit code 1). Reviewed, fix-available HIGH/CRITICAL
+      # findings that originate in upstream base images or third-party modules we do not
+      # build ourselves are time-boxed in .trivyignore.yaml (see that file for the policy
+      # and renewal date). `limit-severities-for-sarif: true` is set on the scan step so
+      # the SARIF scan gates on TRIVY_SEVERITY only; without it the trivy-action would
+      # fail the job on findings of any severity.
+      TRIVY_EXIT_CODE: ${{ vars.TRIVY_EXIT_CODE || '1' }}
+      TRIVY_SEVERITY: ${{ vars.TRIVY_SEVERITY || 'HIGH,CRITICAL' }}
+    steps:
+      - name: Check out vulnerability ignore list
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
+          sparse-checkout: .trivyignore.yaml
+          sparse-checkout-cone-mode: false
+
+      - name: Ensure ignore list exists
+        # The ignore list is referenced explicitly below; guarantee it exists so a ref
+        # predating the file (e.g. a workflow_dispatch checkout_ref) cannot abort the scan.
+        run: test -f .trivyignore.yaml || touch .trivyignore.yaml
+
+      - name: Prepare report name
+        id: report
+        env:
+          IMAGE_REF: ${{ matrix.image }}
+        run: |
+          safe="$(printf '%s' "$IMAGE_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9._-')"
+          echo "artifact=trivy-image-${safe}" >> "$GITHUB_OUTPUT"
+          echo "sarif_file=trivy-image-${safe}.sarif" >> "$GITHUB_OUTPUT"
+
+      - name: Scan image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # 0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image }}
+          format: sarif
+          output: ${{ steps.report.outputs.sarif_file }}
+          severity: ${{ env.TRIVY_SEVERITY }}
+          limit-severities-for-sarif: true
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          exit-code: ${{ env.TRIVY_EXIT_CODE }}
+
+      - name: Upload image scan report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: ${{ steps.report.outputs.artifact }}
+          path: ${{ steps.report.outputs.sarif_file }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload image scan to code scanning
+        if: always()
+        # Tolerate repositories where code scanning is unavailable (e.g. fork
+        # pull requests); the SARIF artifact above remains the fallback.
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5  # v3.36.2
+        with:
+          sarif_file: ${{ steps.report.outputs.sarif_file }}
+          category: ${{ steps.report.outputs.artifact }}
+          ref: ${{ github.ref }}
+          sha: ${{ github.sha }}
+
+      - name: Add scan summary
+        if: always()
+        run: |
+          {
+            echo "### CVE scan"
+            echo "- image: \`${{ matrix.image }}\`"
+            echo "- severity: \`${{ env.TRIVY_SEVERITY }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cve-scan-gate:
+    name: "3e. CVE scan gate"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Always runs so it posts a stable, single status context that branch
+    # protection can require, collapsing the dynamic per-image `cve-scan` matrix
+    # into one gate. `needs.cve-scan.result` aggregates the matrix: `success`
+    # only if every image passed, `failure` if any did, `skipped` when CVE
+    # scanning is disabled (nothing to gate). The image scans are BLOCKING
+    # (TRIVY_EXIT_CODE=1): any unsuppressed HIGH/CRITICAL fails its matrix leg
+    # and this gate turns red. Accepted upstream findings are time-boxed in
+    # .trivyignore.yaml.
+    needs:
+      - cve-scan
+    if: ${{ always() }}
+    steps:
+      - name: Evaluate CVE scan result
+        env:
+          CVE_RESULT: ${{ needs.cve-scan.result }}
+        run: |
+          set -euo pipefail
+          echo "CVE scan matrix result: ${CVE_RESULT}"
+          case "${CVE_RESULT}" in
+            success|skipped)
+              echo "CVE scan gate passed (result: ${CVE_RESULT})."
+              echo "- CVE scan gate: \`${CVE_RESULT}\`" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "CVE scan gate failed: one or more image scans did not succeed (result: ${CVE_RESULT})." >&2
+              echo "- CVE scan gate: \`${CVE_RESULT}\` (blocking)" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+
+  config-scan:
+    name: "3c. Config security scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - params
+      - ocm-package
+    if: ${{ needs.params.outputs.run_cve_scan == 'true' }}
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    env:
+      TRIVY_EXIT_CODE: ${{ vars.TRIVY_CONFIG_EXIT_CODE || '0' }}
+      TRIVY_SEVERITY: ${{ vars.TRIVY_SEVERITY || 'HIGH,CRITICAL' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
+
+      - name: Ensure ignore list exists
+        # The ignore list is referenced explicitly below; guarantee it exists so a ref
+        # predating the file (e.g. a workflow_dispatch checkout_ref) cannot abort the scan.
+        run: test -f .trivyignore || touch .trivyignore
+
+      - name: Scan repository configuration
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # 0.35.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-config.sarif
+          severity: ${{ env.TRIVY_SEVERITY }}
+          trivyignores: .trivyignore
+          exit-code: ${{ env.TRIVY_EXIT_CODE }}
+
+      - name: Upload config scan report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: trivy-config
+          path: trivy-config.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload config scan to code scanning
+        if: always()
+        # Tolerate repositories where code scanning is unavailable (e.g. fork
+        # pull requests); the SARIF artifact above remains the fallback.
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5  # v3.36.2
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+          ref: ${{ github.ref }}
+          sha: ${{ github.sha }}
+
+  image-sbom:
+    name: "3d. Image SBOM"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - params
+      - image-matrix
+    if: ${{ needs.params.outputs.run_cve_scan == 'true' }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.image-matrix.outputs.images) }}
+    steps:
+      - name: Install Syft
+        run: |
+          set -euo pipefail
+          SYFT_TARBALL="syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/${SYFT_TARBALL}" -o "/tmp/${SYFT_TARBALL}"
+          curl -sSfL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_checksums.txt" -o /tmp/syft-checksums.txt
+          cd /tmp
+          grep "${SYFT_TARBALL}" syft-checksums.txt | sha256sum -c -
+          tar xzf "${SYFT_TARBALL}" syft
+          sudo install -m 0755 /tmp/syft /usr/local/bin/syft
+
+      - name: Prepare SBOM name
+        id: sbom
+        env:
+          IMAGE_REF: ${{ matrix.image }}
+        run: |
+          safe="$(printf '%s' "$IMAGE_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9._-')"
+          echo "artifact=sbom-image-${safe}" >> "$GITHUB_OUTPUT"
+          echo "file=sbom-image-${safe}.cdx.json" >> "$GITHUB_OUTPUT"
+
+      - name: Generate image SBOM
+        env:
+          IMAGE_REF: ${{ matrix.image }}
+          SBOM_FILE: ${{ steps.sbom.outputs.file }}
+        run: |
+          set -euo pipefail
+          syft "registry:${IMAGE_REF}" --platform linux/amd64 -o "cyclonedx-json=${SBOM_FILE}"
+          test -s "${SBOM_FILE}"
+
+      - name: Upload image SBOM
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: ${{ steps.sbom.outputs.artifact }}
+          path: ${{ steps.sbom.outputs.file }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Add SBOM summary
+        if: always()
+        env:
+          IMAGE_REF: ${{ matrix.image }}
+        run: |
+          {
+            echo "### Image SBOM"
+            echo "- image: \`${IMAGE_REF}\`"
+            echo "- format: \`cyclonedx-json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-smoke:
+    name: "4. Deploy and smoke test"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    needs:
+      - params
+      - ocm-package
+      - cve-scan
+      - config-scan
+    # Run when neither scan job failed/cancelled. `success()` would block when scans are skipped,
+    # so we explicitly allow `skipped` results from the scan jobs.
+    if: >-
+      ${{ !cancelled()
+          && needs.ocm-package.result == 'success'
+          && (needs.cve-scan.result == 'success' || needs.cve-scan.result == 'skipped')
+          && (needs.config-scan.result == 'success' || needs.config-scan.result == 'skipped')
+          && (github.event_name != 'workflow_dispatch' || inputs.run_deploy) }}
+    concurrency:
+      group: powerdns-ci-deploy
+      cancel-in-progress: false
+    env:
+      NAMESPACE: ${{ vars.CI_NAMESPACE || 'dns' }}
+      KUBE_AUTH_MODE: ${{ vars.KUBE_AUTH_MODE || 'kubeconfig' }}
+      KUBE_AUTH_ALLOW_PR_DEPLOY: ${{ vars.KUBE_AUTH_ALLOW_PR_DEPLOY || 'false' }}
+      RUN_NETWORK_SMOKE: ${{ vars.RUN_NETWORK_SMOKE || 'false' }}
+      RUN_MULTI_INSTANCE: ${{ vars.RUN_MULTI_INSTANCE || 'true' }}
+      RUN_OBSERVABILITY: ${{ needs.params.outputs.run_observability }}
+      VALIDATION_SUITES: ${{ needs.params.outputs.validation_suites }}
+      DEPLOY_SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_source || 'package' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
+
+      # Authenticate to the target cluster (kubeconfig secret or EKS OIDC) and
+      # install kubectl. Shared with the other cluster job via a local composite action.
+      - name: Authenticate to cluster
+        id: cluster
+        uses: ./.github/actions/cluster-auth
+        with:
+          auth-mode: ${{ env.KUBE_AUTH_MODE }}
+          allow-pr-deploy: ${{ env.KUBE_AUTH_ALLOW_PR_DEPLOY }}
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+          aws-region: ${{ vars.AWS_REGION }}
+          eks-cluster-name: ${{ vars.EKS_CLUSTER_NAME }}
+          aws-role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          kubectl-version: ${{ env.KUBECTL_VERSION }}
+          summary-title: "Deployment smoke tests"
+
+      - name: Ensure Prometheus Operator
+        if: ${{ steps.cluster.outputs.enabled == 'true' && env.RUN_OBSERVABILITY == 'true' }}
+        run: |
+          set -euo pipefail
+          bash hack/ensure-prometheus-operator.sh
+
+      # Default path: deploy from the OCM package so the published artifact is
+      # what gets exercised. `deploy_source=source` skips these three steps and
+      # falls back to the in-repo deploy/ tree (break-glass / source comparison).
+      - name: Download OCM package
+        if: ${{ steps.cluster.outputs.enabled == 'true' && env.DEPLOY_SOURCE == 'package' }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        with:
+          name: ocm-package
+          path: .
+
+      - name: Setup OCM CLI
+        if: ${{ steps.cluster.outputs.enabled == 'true' && env.DEPLOY_SOURCE == 'package' }}
+        uses: open-component-model/ocm-setup-action@8c71929f38d3486e352e5d7aaf813f36accaaf43
+        with:
+          version: ${{ env.OCM_CLI_VERSION }}
+
+      # Extract the Kustomize tree from the package's `deploy-manifests` resource.
+      # A single extraction yields the deploy root and its `kro/` subdirectory.
+      - name: Extract manifests from OCM package
+        if: ${{ steps.cluster.outputs.enabled == 'true' && env.DEPLOY_SOURCE == 'package' }}
+        run: |
+          set -euo pipefail
+
+          ocm version
+          test -f ocm/ctf.tar
+          if [ -f ocm/ctf.tar.sha256 ]; then
+            sha256sum -c ocm/ctf.tar.sha256
+          fi
+
+          ref="$(make -s print-component-ref)"
+          out="${RUNNER_TEMP}/ocm-deploy"
+          echo "Extracting deploy-manifests from ${ref}"
+
+          rm -rf "$out"
+          ocm download resources --downloader ocm/dirtree \
+            "ocm/ctf.tar//${ref}" deploy-manifests -O "$out"
+
+          test -d "${out}/base"
+          test -d "${out}/kro"
+          test -d "${out}/overlays/monitoring"
+          kubectl kustomize "$out" >/dev/null
+          kubectl kustomize "${out}/kro" >/dev/null
+          kubectl kustomize "${out}/overlays/monitoring" >/dev/null
+
+          printf 'DEPLOY_DIR=%s\n' "$out" >> "$GITHUB_ENV"
+
+      - name: Deploy manifests
+        if: ${{ steps.cluster.outputs.enabled == 'true' }}
+        run: |
+          set -euo pipefail
+
+          # Package mode sets DEPLOY_DIR via the extraction step; source mode
+          # (or any unset case) falls back to the in-repo deploy/ tree.
+          DEPLOY_DIR="${DEPLOY_DIR:-deploy}"
+
+          rollout_on_checksum_change() {
+            local deployment="$1"
+            local annotation="$2"
+            shift 2
+
+            # Hash file contents only (path-independent) so the same manifests
+            # produce the same annotation whether deployed from package or source.
+            local checksum
+            checksum="$(for file in "$@"; do sha256sum "$file" | awk '{print $1}'; done | sha256sum | awk '{print $1}')"
+            kubectl patch "deployment/${deployment}" -n "$NAMESPACE" --type merge \
+              -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"ci.powerdns.dev/${annotation}\":\"${checksum}\"}}}}}"
+          }
+
+          kubectl apply -k "$DEPLOY_DIR"
+          if [ "$RUN_MULTI_INSTANCE" = "true" ]; then
+            kubectl apply -k "${DEPLOY_DIR}/kro"
+            if ! kubectl wait resourcegraphdefinition/powerdnsinstance --for=condition=Ready --timeout=120s; then
+              kubectl get resourcegraphdefinition powerdnsinstance -o yaml
+              exit 1
+            fi
+            kubectl wait crd/powerdnsinstances.kro.run --for=condition=Established --timeout=120s
+          fi
+          rollout_on_checksum_change dnsdist config "${DEPLOY_DIR}/base/dnsdist/configmap.yaml"
+          rollout_on_checksum_change pdns-recursor config "${DEPLOY_DIR}/base/recursor/configmap.yaml"
+          rollout_on_checksum_change pdns-auth config "${DEPLOY_DIR}/base/authoritative/configmap.yaml" "${DEPLOY_DIR}/base/authoritative/configmap-lightningstream.yaml"
+          rollout_on_checksum_change pdns-operator api-key "${DEPLOY_DIR}/base/operator/secret.yaml"
+          # Wait for all four deployments in a single bounded readiness check; this caps
+          # the readiness phase at one 180s budget instead of a separate 180s per deployment.
+          kubectl wait --for=condition=Available \
+            deployment/dnsdist deployment/pdns-recursor deployment/pdns-auth deployment/pdns-operator \
+            -n "$NAMESPACE" --timeout=180s
+
+      - name: Deploy observability verification stack
+        if: ${{ steps.cluster.outputs.enabled == 'true' && env.RUN_OBSERVABILITY == 'true' }}
+        run: |
+          set -euo pipefail
+          DEPLOY_DIR="${DEPLOY_DIR:-deploy}"
+
+          kubectl apply -f "${DEPLOY_DIR}/overlays/monitoring/service-monitors.yaml"
+          kubectl apply -f hack/ci/prometheus.yaml
+
+          # Prometheus runs in its own `monitoring` namespace; the operator
+          # creates the StatefulSet alongside the Prometheus custom resource.
+          for _ in $(seq 1 60); do
+            if kubectl get statefulset/prometheus-powerdns-ci -n monitoring &>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          kubectl rollout status statefulset/prometheus-powerdns-ci \
+            -n monitoring --timeout=180s
+
+      # Print the most useful Kubernetes state when deployment or readiness checks fail.
+      - name: Collect deployment diagnostics
+        if: ${{ failure() && steps.cluster.outputs.enabled == 'true' }}
+        run: |
+          set -euo pipefail
+
+          kubectl -n "$NAMESPACE" get deploy,pods,svc,pvc
+          if kubectl get crd servicemonitors.monitoring.coreos.com &>/dev/null; then
+            kubectl -n "$NAMESPACE" get servicemonitors
+            kubectl -n monitoring get prometheuses,statefulsets,pods 2>/dev/null || true
+          fi
+          kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -80
+          kubectl -n "$NAMESPACE" describe deployments
+          kubectl -n "$NAMESPACE" describe pods
+
+          for deployment in dnsdist pdns-recursor pdns-auth pdns-operator; do
+            echo "### Logs for deployment/${deployment}"
+            kubectl -n "$NAMESPACE" logs "deployment/${deployment}" --all-containers --tail=200 || true
+          done
+
+      - name: Run smoke tests
+        if: ${{ steps.cluster.outputs.enabled == 'true' }}
+        env:
+          NAMESPACE: ${{ env.NAMESPACE }}
+        run: |
+          set -euo pipefail
+          bash hack/validate-crds.sh --cleanup
+          # validate-operator.sh is not run here: the cluster validation suite below
+          # runs the operator suite as its first sub-suite, so running it here too would
+          # duplicate a full operator reconciliation cycle on every deploy.
+          bash hack/validate-status.sh --cleanup
+          if [ "$RUN_NETWORK_SMOKE" = "true" ]; then
+            bash hack/validate-network-access.sh "$NAMESPACE"
+          else
+            echo "Network smoke test skipped; set RUN_NETWORK_SMOKE=true when LoadBalancer access is available."
+          fi
+
+      - name: Run cluster validation suite
+        if: ${{ steps.cluster.outputs.enabled == 'true' }}
+        env:
+          NAMESPACE: ${{ env.NAMESPACE }}
+        run: |
+          set -euo pipefail
+          bash hack/validate-cluster.sh --cleanup --no-tasklist-update
+
+      - name: Add deployment summary
+        if: ${{ steps.cluster.outputs.enabled == 'true' }}
+        run: |
+          {
+            echo "### Deployment smoke tests"
+            echo "Deployment and smoke tests completed in namespace \`${NAMESPACE}\` (source: \`${DEPLOY_SOURCE}\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  upgrade-smoke:
+    name: "5. Upgrade smoke test"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    needs:
+      - params
+      - ocm-package
+      - deploy-smoke
+    # Opt-in (run_upgrade), and only after deploy-smoke so the two cluster jobs
+    # never mutate the namespace at the same time. `deploy-smoke` may be skipped
+    # (run_deploy=false); allow that so the upgrade test can still run on its own.
+    if: >-
+      ${{ !cancelled()
+          && needs.ocm-package.result == 'success'
+          && (needs.deploy-smoke.result == 'success' || needs.deploy-smoke.result == 'skipped')
+          && needs.params.outputs.run_upgrade == 'true' }}
+    concurrency:
+      group: powerdns-ci-deploy
+      cancel-in-progress: false
+    env:
+      NAMESPACE: ${{ vars.CI_NAMESPACE || 'dns' }}
+      KUBE_AUTH_MODE: ${{ vars.KUBE_AUTH_MODE || 'kubeconfig' }}
+      KUBE_AUTH_ALLOW_PR_DEPLOY: ${{ vars.KUBE_AUTH_ALLOW_PR_DEPLOY || 'false' }}
+      ROLLOUT_TIMEOUT: ${{ vars.UPGRADE_ROLLOUT_TIMEOUT || '300' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.checkout_ref || github.ref }}
+
+      # Authenticate to the target cluster (kubeconfig secret or EKS OIDC) and
+      # install kubectl. Shared with the other cluster job via a local composite action.
+      - name: Authenticate to cluster
+        id: cluster
+        uses: ./.github/actions/cluster-auth
+        with:
+          auth-mode: ${{ env.KUBE_AUTH_MODE }}
+          allow-pr-deploy: ${{ env.KUBE_AUTH_ALLOW_PR_DEPLOY }}
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+          aws-region: ${{ vars.AWS_REGION }}
+          eks-cluster-name: ${{ vars.EKS_CLUSTER_NAME }}
+          aws-role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          kubectl-version: ${{ env.KUBECTL_VERSION }}
+          summary-title: "Upgrade smoke test"
+
+      - name: Setup OCM CLI
+        if: ${{ steps.cluster.outputs.enabled == 'true' }}
+        uses: open-component-model/ocm-setup-action@8c71929f38d3486e352e5d7aaf813f36accaaf43
+        with:
+          version: ${{ env.OCM_CLI_VERSION }}
+
+      # Build the synthetic previous release (baseline) and the upgrade target
+      # (candidate), then extract each package's deploy tree. Exports
+      # BASELINE_DIR / CANDIDATE_DIR / *_AUTH_IMAGE via $GITHUB_ENV.
+      - name: Build upgrade packages
+        if: ${{ steps.cluster.outputs.enabled == 'true' }}
+        run: |
+          set -euo pipefail
+          bash hack/build-upgrade-packages.sh "${RUNNER_TEMP}/upgrade"
+
+      - name: Publish upgrade packages
+        if: ${{ steps.cluster.outputs.enabled == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: ocm-upgrade-packages
+          path: |
+            ${{ runner.temp }}/upgrade/baseline/ocm/ctf.tar
+            ${{ runner.temp }}/upgrade/candidate/ocm/ctf.tar
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Run upgrade validation
+        if: ${{ steps.cluster.outputs.enabled == 'true' }}
+        env:
+          NAMESPACE: ${{ env.NAMESPACE }}
+        run: |
+          set -euo pipefail
+          bash hack/validate-upgrade.sh --cleanup
+
+      # Always return the namespace to the candidate state so a mid-run failure
+      # never leaves the cluster downgraded on the baseline image.
+      - name: Restore candidate state
+        if: ${{ always() && steps.cluster.outputs.enabled == 'true' && env.CANDIDATE_DIR != '' }}
+        run: |
+          set -euo pipefail
+          kubectl apply -k "$CANDIDATE_DIR" >/dev/null
+          kubectl rollout status deployment/pdns-auth -n "$NAMESPACE" --timeout="${ROLLOUT_TIMEOUT}s"
+
+      - name: Collect upgrade diagnostics
+        if: ${{ failure() && steps.cluster.outputs.enabled == 'true' }}
+        run: |
+          set -euo pipefail
+
+          kubectl -n "$NAMESPACE" get deploy,pods,svc,pvc
+          kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -80
+          kubectl -n "$NAMESPACE" describe deployment/pdns-auth
+          kubectl -n "$NAMESPACE" logs deployment/pdns-auth --all-containers --tail=200 || true
+          kubectl -n "$NAMESPACE" logs deployment/pdns-operator --all-containers --tail=200 || true
+
+      - name: Add upgrade summary
+        if: ${{ steps.cluster.outputs.enabled == 'true' }}
+        run: |
+          {
+            echo "### Upgrade smoke test"
+            echo "Upgraded \`${BASELINE_AUTH_IMAGE:-baseline}\` to \`${CANDIDATE_AUTH_IMAGE:-candidate}\` in namespace \`${NAMESPACE}\` and verified rollout, image, persistent volume, and LMDB data continuity."
+          } >> "$GITHUB_STEP_SUMMARY"

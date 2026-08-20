@@ -1,0 +1,98 @@
+# OCM Localization Config — image reference substitution for air-gap deployments
+#
+# NOT a Kubernetes object, NOT a Custom Resource Definition (CRD), and NEVER applied
+# to a cluster with `kubectl apply`. `kind: LocalizationConfig` (apiVersion
+# `config.ocm.software/v1alpha1`) is a plain OCM CLI / OCM tooling artifact defined
+# by the Open Component Model specification (https://ocm.software), read only by
+# OCM-aware tooling while it transports or instantiates the component version. It
+# has no relation whatsoever to this project's own Kubernetes CRDs (`Zone`,
+# `ClusterZone`, `RRset`, `ClusterRRset` — see deploy/base/crds/), which are a
+# completely separate mechanism reconciled by the PowerDNS Operator at runtime. The
+# shared word "Localization" is coincidental: here it means "replace image
+# registry references for a target environment", not anything related to the DNS
+# zone/record CRDs.
+#
+# Purpose: when the OCM component is transported to a private registry, this file
+# tells an OCM-aware deployer (e.g. the OCM Flux plugin, the OCM Add-on Manager, or
+# `ocm` CLI localization commands) which byte ranges inside the bundled Kubernetes
+# manifests (base/**/*.yaml) hold container-image references, so those references
+# can be rewritten to the relocated registry addresses automatically — without any
+# project-specific script and without a cluster in the loop yet.
+#
+# Relationship to hack/localize-images.sh: this file only covers plain, YAML-path
+# addressable image references inside base/**/*.yaml (see `file.path`/`file.value`
+# below). It is consumed exclusively by OCM-native tooling as described above and
+# is independent of, and not required by, the manual `kubectl apply -k
+# deploy/overlays/air-gap/` procedure documented in docs/AIR-GAP-DEPLOYMENT.md,
+# which instead relies on hack/localize-images.sh + a generated Kustomize overlay.
+# hack/localize-images.sh additionally reaches image references that this
+# declarative config structurally cannot address — the multi-instance KRO
+# ResourceGraphDefinition (deploy/kro/powerdns-instance-rgd.yaml), where image
+# references are literal strings inside a CEL-templated document rather than a
+# fixed YAML path in a plain Kubernetes manifest (see the trailing comment below).
+# Both mechanisms exist because they serve different consumers: OCM-native
+# deployers use this file directly; anyone deploying with plain kubectl/kustomize
+# uses hack/localize-images.sh instead. Keep both in sync when adding a new
+# bundled image and its resource name.
+#
+# Resource names must match those declared in component-descriptor.yaml.
+
+apiVersion: config.ocm.software/v1alpha1
+kind: LocalizationConfig
+metadata:
+  name: powerdns-ocm-localization
+
+spec:
+  localizations:
+
+    - name: dnsdist-image
+      resource:
+        name: dnsdist
+      file:
+        path: base/dnsdist/deployment.yaml
+        value: spec.template.spec.containers[0].image
+
+    - name: pdns-recursor-image
+      resource:
+        name: pdns-recursor
+      file:
+        path: base/recursor/deployment.yaml
+        value: spec.template.spec.containers[0].image
+
+    - name: pdns-auth-image
+      resource:
+        name: pdns-authoritative
+      file:
+        path: base/authoritative/deployment.yaml
+        value: spec.template.spec.containers[0].image
+
+    - name: lightningstream-image
+      resource:
+        name: lightningstream
+      file:
+        path: base/authoritative/deployment.yaml
+        value: spec.template.spec.containers[1].image
+
+    # The Authoritative pod also runs lightningstream as an init container
+    # (repair-lmdb-permissions); localize it too so no init container pulls
+    # from an upstream registry.
+    - name: lightningstream-initcontainer-image
+      resource:
+        name: lightningstream
+      file:
+        path: base/authoritative/deployment.yaml
+        value: spec.template.spec.initContainers[0].image
+
+    - name: pdns-operator-image
+      resource:
+        name: pdns-operator
+      file:
+        path: base/operator/deployment.yaml
+        value: spec.template.spec.containers[0].image
+
+    # Garage and its bootstrap helper (garage-bootstrap / alpine) are only
+    # instantiated in multi-instance mode (ADR-006) and exist exclusively in the
+    # KRO ResourceGraphDefinition (deploy/kro/powerdns-instance-rgd.yaml), not in
+    # base/**. Their image references are literal strings the OCM file-path
+    # localization below cannot address, so they are localized by
+    # hack/localize-images.sh (digest-anchored, in place) rather than here.

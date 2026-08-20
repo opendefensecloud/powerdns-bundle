@@ -1,0 +1,32 @@
+# Cluster DNS resolution for every workload pod. The operator resolves the
+# authoritative Service by name (`pdns-auth`); the DNS pods use injected
+# *_SERVICE_HOST env IPs and do not strictly need this, but granting it uniformly
+# is harmless and keeps the policy set simple.
+#
+# The single `to` entry combines namespaceSelector AND podSelector so the match is
+# "kube-dns pods in kube-system", not "anything in kube-system" OR "any kube-dns-
+# labelled pod anywhere".
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-kube-dns
+  namespace: dns
+  labels:
+    app.kubernetes.io/part-of: powerdns-ocm
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

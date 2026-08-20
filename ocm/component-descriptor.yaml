@@ -1,0 +1,165 @@
+# OCM component constructor for the PowerDNS bundle.
+#
+# Build:    make ocm-build
+# Bundle:   ocm transfer commontransportarchive --copy-resources ocm/ctf.tar ocm/ctf-bundled.tar
+# Validate: ocm get componentversion ocm/ctf.tar//github.com/bwi/powerdns-ocm:0.1.0-poc
+# Push:     ocm transfer commontransportarchive ocm/ctf-bundled.tar oci://<registry>
+#
+# Versioning strategy (see docs/UPGRADE.md §1):
+#   The component `version` below is the version of the tested bundle and is
+#   independent of the upstream image versions it carries. It follows SemVer:
+#     MAJOR — breaking CRD/API change, mandatory manual migration, incompatible
+#             persistent-data format change, or any non-rollbackable upgrade.
+#     MINOR — new component or feature, backwards compatible.
+#     PATCH — backwards-compatible image bumps / manifest fixes, no manual steps.
+#   Bump this `version`, the two `directory` resource versions below, and
+#   `COMPONENT_VERSION` in the Makefile together.
+
+name: github.com/bwi/powerdns-ocm
+version: 0.1.0-poc
+provider:
+  name: bwi
+
+sources: []
+
+componentReferences: []
+
+resources:
+  # -------------------------------------------------------------------------
+  # Container images — pulled from upstream registries during `ocm add`,
+  # bundled as local blobs during `ocm transfer --copy-resources`.
+  # -------------------------------------------------------------------------
+
+  - name: dnsdist
+    type: ociImage
+    relation: external
+    version: "1.9.16"
+    access:
+      type: ociArtifact
+      imageReference: powerdns/dnsdist-19:1.9.16@sha256:260b1120947a10c494fad4d93cde33ebace34bf4800c88ebb114dd7f9e829809
+    labels:
+      - name: component
+        value: dns-frontend
+
+  - name: pdns-recursor
+    type: ociImage
+    relation: external
+    version: "5.2.11"
+    access:
+      type: ociArtifact
+      imageReference: powerdns/pdns-recursor-52:5.2.11@sha256:f2eb999df70d6035898aa6e4c427199fa3c1bcad6a53adc41cab7603e4e121cd
+    labels:
+      - name: component
+        value: dns-recursor
+
+  - name: pdns-authoritative
+    type: ociImage
+    relation: external
+    version: "4.9.16"
+    access:
+      type: ociArtifact
+      imageReference: powerdns/pdns-auth-49:4.9.16@sha256:272fe174990ce108461ed3e953b43691509cdcfb138d8c7c61f64d7a61b8e6ad
+    labels:
+      - name: component
+        value: dns-authoritative
+
+  - name: lightningstream
+    type: ociImage
+    relation: external
+    version: "1.0.2"
+    access:
+      type: ociArtifact
+      imageReference: powerdns/lightningstream:1.0.2@sha256:31acb91faadda5ddb5fc03073cd464cecbce7be0f752d70a39ef2ebb0065539f
+    labels:
+      - name: component
+        value: lmdb-replication
+
+  - name: pdns-operator
+    type: ociImage
+    relation: external
+    version: "0.6.0-telekom.1a1bf0c"
+    access:
+      type: ociArtifact
+      imageReference: ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7
+    labels:
+      - name: component
+        value: dns-operator
+
+  # Garage S3-compatible store — only deployed for multi-instance (ADR-006).
+  # Reserved here so the descriptor is complete; the KRO ResourceGraphDefinition
+  # gates instantiation on a multi-instance flag.
+  - name: garage
+    type: ociImage
+    relation: external
+    version: "1.0.1"
+    access:
+      type: ociArtifact
+      imageReference: dxflrs/garage:v1.0.1@sha256:a5706cf1f3d7b349ac5133ec59ad8181b709270b75e5f2fa7b3e1a5c07d67137
+    labels:
+      - name: component
+        value: s3-store
+      - name: deployment-mode
+        value: multi-instance-only
+
+  # Garage bootstrap helper — a short-lived init container that creates the
+  # Garage bucket and access key via the admin API. Deployed only alongside
+  # Garage (multi-instance mode), so it carries the same gating label. Listed
+  # here so it is CVE-scanned and mirrored for air-gap transport like every
+  # other shipped image.
+  - name: garage-bootstrap
+    type: ociImage
+    relation: external
+    version: "3.20"
+    access:
+      type: ociArtifact
+      imageReference: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+    labels:
+      - name: component
+        value: garage-bootstrap
+      - name: deployment-mode
+        value: multi-instance-only
+
+  # Optional web UI slot — not part of the current scope.
+  # Uncomment and fill in once the web UI component is selected.
+  # - name: powerdns-admin
+  #   type: ociImage
+  #   relation: external
+  #   version: "TBD"
+  #   access:
+  #     type: ociArtifact
+  #     imageReference: TBD
+
+  # -------------------------------------------------------------------------
+  # Kubernetes manifests — bundled from the local deploy/ tree as a tar blob.
+  # Extracted by OCM deployer and applied with `kubectl apply -k deploy/`.
+  # -------------------------------------------------------------------------
+
+  - name: deploy-manifests
+    type: directoryTree
+    relation: local
+    version: "0.1.0-poc"
+    input:
+      type: dir
+      path: ../deploy
+      compress: true
+    labels:
+      - name: description
+        value: Kustomize manifests for all DNS components
+
+  # KRO ResourceGraphDefinition and example ResourceInstance objects.
+  # Apply with: kubectl apply -k deploy/kro/
+  # The RGD (powerdns-instance-rgd.yaml) is the cluster-wide blueprint;
+  # example files show single-instance and multi-instance instantiation.
+  - name: kro-manifests
+    type: directoryTree
+    relation: local
+    version: "0.1.0-poc"
+    input:
+      type: dir
+      path: ../deploy/kro
+      compress: true
+    labels:
+      - name: description
+        value: KRO ResourceGraphDefinition and example PowerDNSInstance objects
+      - name: component
+        value: kro-rgd

@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lightningstream-config
+  namespace: dns
+data:
+  lightningstream.yaml: |
+    # Single-instance deployment: filesystem backend on the shared data PVC (ADR-006).
+    # For multi-instance, switch storage.type to s3 and add Garage credentials (ADR-003).
+    lmdbs:
+      main:
+        path: /var/lib/powerdns/pdns.lmdb
+        options:
+          no_subdir: true
+          create: true
+          map_size: 1000MB
+        schema_tracks_changes: true
+      shard:
+        path: /var/lib/powerdns/pdns.lmdb-0
+        options:
+          no_subdir: true
+          create: true
+          map_size: 1000MB
+        schema_tracks_changes: true
+
+    storage:
+      type: fs
+      options:
+        root_path: /var/lib/powerdns/snapshots
+
+    lmdb_poll_interval: 1s
+    storage_poll_interval: 1s

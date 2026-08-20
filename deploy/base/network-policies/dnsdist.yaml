@@ -1,0 +1,40 @@
+# dnsdist is the public DNS frontend (LoadBalancer). It accepts DNS from any
+# source and forwards to the recursor and authoritative backends.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dnsdist
+  namespace: dns
+  labels:
+    app.kubernetes.io/part-of: powerdns-ocm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dnsdist
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Public DNS service: allow 53/udp+tcp from any source (omitting `from`
+    # matches all peers). The 5199 console port is intentionally not opened.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+  egress:
+    # Forward queries to the recursor (recursion) and the authoritative server
+    # (RD=0 direct lookups). Backends are reached via Service ClusterIPs, which
+    # DNAT to these pod IPs.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pdns-recursor
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pdns-auth
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

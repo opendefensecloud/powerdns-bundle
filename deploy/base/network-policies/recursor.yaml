@@ -1,0 +1,61 @@
+# Recursor: accepts DNS from dnsdist and metrics scrapes from the monitoring
+# namespace; forwards local zones to the authoritative server and recurses to
+# upstream resolvers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: recursor
+  namespace: dns
+  labels:
+    app.kubernetes.io/part-of: powerdns-ocm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pdns-recursor
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # DNS queries from the dnsdist frontend.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: dnsdist
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Prometheus metrics scrape from any namespace labelled as monitoring.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network-policy/monitoring: "true"
+      ports:
+        - protocol: TCP
+          port: 8082
+  egress:
+    # Forward local zones to the authoritative server. Kept explicit so this flow
+    # survives narrowing the upstream-resolver rule below to specific forwarders.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pdns-auth
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Recursion to upstream/internet DNS resolvers. Forwarders are user-
+    # configurable (and may be replaced with full root recursion), so egress is
+    # restricted by port (53) rather than destination IP to stay portable. For a
+    # hardened deployment, narrow this to the specific forwarder addresses via an
+    # overlay.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

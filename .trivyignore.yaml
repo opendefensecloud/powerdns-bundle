@@ -1,0 +1,64 @@
+# Trivy vulnerability allowlist (image CVE scan)
+#
+# Policy: every entry below is a HIGH/CRITICAL, fix-available finding that
+# originates in a third-party module or base image we do not build ourselves,
+# and for which no patched upstream image/digest was published as of
+# 2026-08-05 (verified by scanning the latest available tags). Each suppression
+# is time-boxed via `expired-at`; once expired the finding re-fails the gate and
+# must be re-triaged (bump the image digest or renew with fresh justification).
+#
+# The dnsdist / pdns-recursor / pdns-authoritative base-image CVEs previously
+# listed here were cleared on 2026-07-06 by bumping to rebuilt upstream patch
+# images (dnsdist 1.9.16, pdns-recursor 5.2.11, pdns-auth 4.9.16), which all
+# scan clean. The refreshed PowerDNS Operator image also scans clean, leaving
+# only lightningstream findings that require an upstream rebuild suppressed
+# below.
+#
+# Review/renewal date: 2026-09-05
+vulnerabilities:
+  # --- lightningstream: golang.org/x/crypto (SSH) compiled into the binary ---
+  - id: CVE-2026-39831
+    # HIGH in golang.org/x/crypto (lightningstream)
+    statement: >-
+      golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
+  - id: CVE-2026-39828
+    # HIGH in golang.org/x/crypto (lightningstream)
+    statement: >-
+      golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
+  - id: CVE-2026-39829
+    # HIGH in golang.org/x/crypto (lightningstream)
+    statement: >-
+      golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
+  - id: CVE-2026-39830
+    # HIGH in golang.org/x/crypto (lightningstream)
+    statement: >-
+      golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
+  - id: CVE-2026-39832
+    # HIGH in golang.org/x/crypto (lightningstream)
+    statement: >-
+      golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
+  - id: CVE-2026-39835
+    # HIGH in golang.org/x/crypto (lightningstream)
+    statement: >-
+      golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
+  - id: CVE-2026-42508
+    # HIGH in golang.org/x/crypto (lightningstream)
+    statement: >-
+      golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
+  - id: CVE-2026-46595
+    # HIGH in golang.org/x/crypto (lightningstream)
+    statement: >-
+      golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
+  - id: CVE-2026-46597
+    # HIGH in golang.org/x/crypto (lightningstream)
+    statement: >-
+      golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
