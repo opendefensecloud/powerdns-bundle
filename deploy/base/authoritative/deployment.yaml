@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: repair-lmdb-permissions
-          image: powerdns/lightningstream:1.0.2@sha256:31acb91faadda5ddb5fc03073cd464cecbce7be0f752d70a39ef2ebb0065539f
+          image: powerdns/lightningstream:1.0.3@sha256:b8698c930fe347e55c307adeb7950d5c249410ec0f7460f96d955a8bf706852d
           command:
             - /bin/sh
             - -c
@@ -111,7 +111,7 @@ spec:
             failureThreshold: 3
 
         - name: lightningstream
-          image: powerdns/lightningstream:1.0.2@sha256:31acb91faadda5ddb5fc03073cd464cecbce7be0f752d70a39ef2ebb0065539f
+          image: powerdns/lightningstream:1.0.3@sha256:b8698c930fe347e55c307adeb7950d5c249410ec0f7460f96d955a8bf706852d
           args:
             - sync
             - --config

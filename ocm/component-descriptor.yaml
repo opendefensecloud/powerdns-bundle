@@ -66,10 +66,10 @@ resources:
   - name: lightningstream
     type: ociImage
     relation: external
-    version: "1.0.2"
+    version: "1.0.3"
     access:
       type: ociArtifact
-      imageReference: powerdns/lightningstream:1.0.2@sha256:31acb91faadda5ddb5fc03073cd464cecbce7be0f752d70a39ef2ebb0065539f
+      imageReference: powerdns/lightningstream:1.0.3@sha256:b8698c930fe347e55c307adeb7950d5c249410ec0f7460f96d955a8bf706852d
     labels:
       - name: component
         value: lmdb-replication
@@ -77,10 +77,10 @@ resources:
   - name: pdns-operator
     type: ociImage
     relation: external
-    version: "0.6.0-telekom.1a1bf0c"
+    version: "0.6.0-telekom.b6cc86a"
     access:
       type: ociArtifact
-      imageReference: ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7
+      imageReference: ghcr.io/telekom/powerdns-operator:sha-b6cc86a@sha256:4e84a237f4b30e912c5e5a4cfe615eeaf11f4c102c64e5f46c0867ed6348af6c
     labels:
       - name: component
         value: dns-operator

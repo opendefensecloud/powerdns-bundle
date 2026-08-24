@@ -604,22 +604,29 @@ The namespace model keeps Kubernetes objects, credentials, Services, and persist
 Each instance runs its own PowerDNS Operator deployment, configured with a namespace-local `PDNS_API_URL` and the `WATCH_NAMESPACE` environment variable set to the instance namespace. With `WATCH_NAMESPACE` set, the operator's manager cache is restricted to that namespace, so namespaced `Zone` and `RRset` resources from other namespaces are neither watched nor reconciled. As defense in depth, the per-instance operator `ServiceAccount` is granted only a namespaced `Role` for the namespaced CRDs and operational resources (`zones`, `rrsets`, `events`, `leases`); a minimal `ClusterRole` covers the cluster-scoped `ClusterZone` / `ClusterRRset` CRDs that the operator binary always reconciles. End-to-end configuration and runtime isolation is verified by [`hack/validate-multi-instance.sh`](../hack/validate-multi-instance.sh).
 
 The shipping image
-(`ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7`)
+(`ghcr.io/telekom/powerdns-operator:sha-b6cc86a@sha256:4e84a237f4b30e912c5e5a4cfe615eeaf11f4c102c64e5f46c0867ed6348af6c`)
 is built from the public maintained branch
 [`telekom/PowerDNS-Operator:feat/watch-namespace-env`](https://github.com/telekom/PowerDNS-Operator/tree/feat/watch-namespace-env)
 at commit
-[`1a1bf0c`](https://github.com/telekom/PowerDNS-Operator/commit/1a1bf0c19fc86512cc3b13829e298a99c3aa7d93).
-That commit reapplies the `WATCH_NAMESPACE` patch to pinned upstream commit
-[`powerdns-operator/PowerDNS-Operator@255d6b0`](https://github.com/powerdns-operator/PowerDNS-Operator/commit/255d6b01372aa94118d2e875553af783fb5062e4).
-It is not the plain upstream image; searching the upstream `main` branch alone
-for `WATCH_NAMESPACE` therefore finds no matches.
+[`b6cc86a`](https://github.com/telekom/PowerDNS-Operator/commit/b6cc86a).
+That commit is an empty, code-identical rebuild of
+[`1a1bf0c`](https://github.com/telekom/PowerDNS-Operator/commit/1a1bf0c19fc86512cc3b13829e298a99c3aa7d93)
+(the commit that reapplies the `WATCH_NAMESPACE` patch to pinned upstream commit
+[`powerdns-operator/PowerDNS-Operator@255d6b0`](https://github.com/powerdns-operator/PowerDNS-Operator/commit/255d6b01372aa94118d2e875553af783fb5062e4)),
+triggered solely to refresh the `golang:1.26` build base and clear HIGH-severity
+Go stdlib CVEs (CVE-2026-33818, CVE-2026-39821, CVE-2026-46600, CVE-2026-56853,
+CVE-2026-56858, CVE-2026-56859, CVE-2026-56860, CVE-2026-56862) flagged by the
+`odc-powerdns-bundle-dev` CVE scan gate. It is not the plain upstream image;
+searching the upstream `main` branch alone for `WATCH_NAMESPACE` therefore
+finds no matches.
 The public
-[`1a1bf0c` build workflow](https://github.com/telekom/PowerDNS-Operator/actions/runs/31013044539)
+[`b6cc86a` build workflow](https://github.com/telekom/PowerDNS-Operator/actions/runs/32718935477)
 passed generated-code checks, lint, unit tests, PowerDNS 4.9 and 5.0 end-to-end
 tests, image scanning, and multi-architecture publishing.
 The previously deployed source and pre-refresh feature branch remain
 independently verifiable through the
-[`archive/watch-namespace-deployed-b23ee7d`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-deployed-b23ee7d)
+[`archive/watch-namespace-deployed-1a1bf0c`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-deployed-1a1bf0c),
+[`archive/watch-namespace-deployed-b23ee7d`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-deployed-b23ee7d),
 and
 [`archive/watch-namespace-pre-refresh-5c6edda`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-pre-refresh-5c6edda)
 tags. Upstream support is tracked in
