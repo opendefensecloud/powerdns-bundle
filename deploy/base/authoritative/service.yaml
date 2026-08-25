@@ -4,7 +4,7 @@ metadata:
   name: pdns-auth
   namespace: dns
   labels:
-    app.kubernetes.io/name: dns-authoritative
+    app.kubernetes.io/name: pdns-auth
     app.kubernetes.io/component: dns-authoritative
   annotations:
     prometheus.io/scrape: "true"

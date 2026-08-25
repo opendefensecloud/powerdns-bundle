@@ -24,7 +24,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: dns-authoritative
+      app.kubernetes.io/name: pdns-auth
   endpoints:
     - port: api
       path: /metrics
