@@ -46,6 +46,7 @@ spec:
   namespace: dns-a
   pdnsApiKey: changeme-a
   multiInstance: true
+  lmdbMapSizeMB: 1000
 
 ---
 apiVersion: kro.run/v1alpha1
@@ -57,3 +58,4 @@ spec:
   namespace: dns-b
   pdnsApiKey: changeme-b
   multiInstance: true
+  lmdbMapSizeMB: 1000

@@ -53,6 +53,12 @@ spec:
       namespace: string | default="dns"
       pdnsApiKey: string | required=true
       multiInstance: boolean | default=false
+      # Single source of truth for the LMDB map size shared by the Auth
+      # process (lmdb-map-size) and the Lightning Stream sidecar (map_size).
+      # The Auth PVC and Garage layout capacity are derived at 4 MiB per map
+      # MB: 2x for the main and shard environments plus 2x operational
+      # headroom for snapshots and filesystem/storage overhead.
+      lmdbMapSizeMB: integer | default=1000 minimum=256
 
   # ---------------------------------------------------------------------------
   # Resources — ordered by KRO via implicit CEL-expression dependencies
@@ -256,8 +262,8 @@ spec:
             # previous mapasync sync mode and requires a single shard in this mode.
             lmdb-lightning-stream=yes
             lmdb-shards=1
-            # Match Lightning Stream's LMDB map_size so both processes can open the same environment.
-            lmdb-map-size=1000
+            # Match Lightning Stream's LMDB map_size (MB) so both processes can open the same environment.
+            lmdb-map-size=${string(schema.spec.lmdbMapSizeMB)}
 
             api=yes
             api-key=${schema.spec.pdnsApiKey}
@@ -287,20 +293,27 @@ spec:
                 options:
                   no_subdir: true
                   create: true
-                  map_size: 1000MB
+                  map_size: ${string(schema.spec.lmdbMapSizeMB)}MB
                 schema_tracks_changes: true
               shard:
                 path: /var/lib/powerdns/pdns.lmdb-0
                 options:
                   no_subdir: true
                   create: true
-                  map_size: 1000MB
+                  map_size: ${string(schema.spec.lmdbMapSizeMB)}MB
                 schema_tracks_changes: true
 
             storage:
               type: fs
               options:
                 root_path: /var/lib/powerdns/snapshots
+              # Disabled by default upstream; explicit cleanup prevents
+              # snapshots from growing without bound on the Auth PVC.
+              cleanup:
+                enabled: true
+                interval: 5m
+                must_keep_interval: 10m
+                remove_old_instances_interval: 168h
 
             lmdb_poll_interval: 1s
             storage_poll_interval: 1s
@@ -326,14 +339,14 @@ spec:
                 options:
                   no_subdir: true
                   create: true
-                  map_size: 1000MB
+                  map_size: ${string(schema.spec.lmdbMapSizeMB)}MB
                 schema_tracks_changes: true
               shard:
                 path: /var/lib/powerdns/pdns.lmdb-0
                 options:
                   no_subdir: true
                   create: true
-                  map_size: 1000MB
+                  map_size: ${string(schema.spec.lmdbMapSizeMB)}MB
                 schema_tracks_changes: true
 
             storage:
@@ -352,6 +365,13 @@ spec:
                 access_key: $LIGHTNINGSTREAM_S3_ACCESS_KEY
                 secret_key: $LIGHTNINGSTREAM_S3_SECRET_KEY
                 init_timeout: 120s
+              # Keep enough history for slow peers without allowing the
+              # single-node Garage store to grow indefinitely.
+              cleanup:
+                enabled: true
+                interval: 5m
+                must_keep_interval: 10m
+                remove_old_instances_interval: 168h
 
             lmdb_poll_interval: 1s
             storage_poll_interval: 1s
@@ -453,7 +473,10 @@ spec:
             - ReadWriteOnce
           resources:
             requests:
-              storage: 1Gi
+              # Four MiB per map-size MB covers both LMDB environments plus
+              # equivalent headroom. The default 1000 MB map provisions
+              # 4000Mi; increasing lmdbMapSizeMB expands the claim in lockstep.
+              storage: "${string(schema.spec.lmdbMapSizeMB * 4)}Mi"
 
     # =========================================================================
     # Layer 5 — Garage S3 store (multi-instance only)
@@ -614,7 +637,7 @@ spec:
                 # Bootstrap sidecar.
                 #
                 # Drives the garage admin API at 127.0.0.1:3903 to:
-                #   1. assign a single-node layout (zone=default, capacity=1GB)
+                #   1. assign a single-node layout sized from lmdbMapSizeMB
                 #   2. import the deterministic Lightning Stream S3 key
                 #   3. create the pdns-lmdb bucket
                 #   4. grant the key read+write+owner on that bucket
@@ -634,6 +657,7 @@ spec:
                       ACCESS_KEY="$(cat /etc/garage-credentials/s3-access-key)"
                       SECRET_KEY="$(cat /etc/garage-credentials/s3-secret-key)"
                       API="http://127.0.0.1:3903"
+                      DESIRED_CAPACITY=${string(schema.spec.lmdbMapSizeMB * 4000000)}
                       AUTH="Authorization: Bearer $ADMIN_TOKEN"
 
                       log() { echo "[bootstrap] $*"; }
@@ -658,23 +682,32 @@ spec:
                       esac
                       log "node id $node_id, current layout version $layout_version"
 
-                      if [ "$layout_version" -eq 0 ]; then
-                        log "staging single-node layout (zone=default, capacity=1GB)"
+                      layout="$(curl -fsS -H "$AUTH" "$API/v1/layout")"
+                      current_capacity="$(printf '%s' "$layout" | jq -r \
+                        --arg id "$node_id" '.roles[]? | select(.id == $id) | .capacity // empty')"
+
+                      if [ "$current_capacity" != "$DESIRED_CAPACITY" ]; then
+                        next_layout_version=$((layout_version + 1))
+                        log "staging single-node layout (zone=default, capacity=$DESIRED_CAPACITY bytes)"
                         body="$(jq -nc --arg id "$node_id" \
-                          '[{id:$id,zone:"default",capacity:1000000000,tags:[]}]')"
+                          '[{id:$id,zone:"default",capacity:${string(schema.spec.lmdbMapSizeMB * 4000000)},tags:[]}]')"
                         curl -fsS -X POST -H "$AUTH" -H 'Content-Type: application/json' \
                           -d "$body" "$API/v1/layout" >/dev/null
-                        log "applying layout version 1"
+                        log "applying layout version $next_layout_version"
                         curl -fsS -X POST -H "$AUTH" -H 'Content-Type: application/json' \
-                          -d '{"version":1}' "$API/v1/layout/apply" >/dev/null
+                          -d "{\"version\":$next_layout_version}" "$API/v1/layout/apply" >/dev/null
                         log "waiting for layout to take effect"
                         for _ in $(seq 1 30); do
                           new_v="$(curl -fsS -H "$AUTH" "$API/v1/status" | jq '.layoutVersion')"
-                          [ "$new_v" = "1" ] && break
+                          [ "$new_v" = "$next_layout_version" ] && break
                           sleep 1
                         done
+                        if [ "$new_v" != "$next_layout_version" ]; then
+                          log "ERROR: Garage layout remained at version $new_v"
+                          exit 1
+                        fi
                       else
-                        log "layout already at version $layout_version; skipping"
+                        log "layout capacity already $current_capacity bytes; skipping"
                       fi
 
                       key_code="$(curl -s -o /dev/null -w '%{http_code}' \
@@ -828,6 +861,10 @@ spec:
               labels:
                 app.kubernetes.io/name: pdns-auth
                 app.kubernetes.io/component: dns-auth
+              annotations:
+                # The map value forces a Recreate rollout when it changes; the
+                # revision prefix forces one when the shared config contract changes.
+                powerdns.cav.enablers.ob/lmdb-config-revision: "cleanup-v1-map-${string(schema.spec.lmdbMapSizeMB)}"
             spec:
               automountServiceAccountToken: false
               securityContext:

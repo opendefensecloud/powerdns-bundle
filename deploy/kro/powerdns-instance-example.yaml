@@ -29,3 +29,5 @@ spec:
   namespace: dns
   pdnsApiKey: changeme
   multiInstance: false
+  # 4Mi of PVC capacity is provisioned per MB (4000Mi at this default).
+  lmdbMapSizeMB: 1000

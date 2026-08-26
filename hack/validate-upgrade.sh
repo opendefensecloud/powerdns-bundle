@@ -70,6 +70,7 @@ get_auth_pod()    { "$KUBECTL" get pod -n "$NAMESPACE" -l app.kubernetes.io/name
 get_auth_uid()    { "$KUBECTL" get pod -n "$NAMESPACE" -l app.kubernetes.io/name=pdns-auth --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.uid}' 2>/dev/null || true; }
 get_auth_image()  { "$KUBECTL" get deployment pdns-auth -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[?(@.name=="pdns-auth")].image}' 2>/dev/null || true; }
 get_pvc_volume()  { "$KUBECTL" get pvc "$PVC_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.volumeName}' 2>/dev/null || true; }
+get_pvc_request() { "$KUBECTL" get pvc "$PVC_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null || true; }
 
 # Calls the pdns-auth HTTP API through a short-lived kubectl port-forward and
 # prints the response body. The Authoritative Server is the only valid LMDB
@@ -134,6 +135,47 @@ apply_tree() {
   done
 }
 
+apply_rollback_tree() {
+  # PVC expansion cannot be rolled back. Apply a temporary copy of the baseline
+  # tree whose PVC request is kept at the candidate size so the application
+  # rollback does not attempt an unsupported volume shrink.
+  local source="$1" pvc_request="$2"
+  local work pvc_manifest rc=0
+  if [[ -z "$pvc_request" ]]; then
+    echo "candidate PVC request is empty; refusing to prepare rollback manifests" >&2
+    return 1
+  fi
+  work="$(mktemp -d)"
+  pvc_manifest="${work}/base/authoritative/pvc.yaml"
+  cp -R "${source}/." "$work/"
+
+  if [[ ! -f "$pvc_manifest" ]]; then
+    echo "baseline PVC manifest not found at ${pvc_manifest}" >&2
+    rm -rf "$work"
+    return 1
+  fi
+
+  awk -v request="$pvc_request" '
+    /^[[:space:]]*storage:/ {
+      match($0, /^[[:space:]]*/)
+      print substr($0, 1, RLENGTH) "storage: " request
+      next
+    }
+    { print }
+  ' "$pvc_manifest" > "${pvc_manifest}.tmp"
+  mv "${pvc_manifest}.tmp" "$pvc_manifest"
+  if ! grep -Eq "^[[:space:]]+storage: ${pvc_request}$" "$pvc_manifest"; then
+    echo "failed to preserve PVC request ${pvc_request} in rollback manifest" >&2
+    rm -rf "$work"
+    return 1
+  fi
+  if ! apply_tree "$work"; then
+    rc=1
+  fi
+  rm -rf "$work"
+  return "$rc"
+}
+
 echo "=== OCM Package Upgrade Validation ==="
 echo "  Baseline : ${BASELINE_AUTH_IMAGE}"
 echo "  Candidate: ${CANDIDATE_AUTH_IMAGE}"
@@ -144,8 +186,10 @@ apply_tree "$BASELINE_DIR"
 expect_eq "pdns-auth runs the baseline image" "$(get_auth_image)" "$BASELINE_AUTH_IMAGE"
 
 PVC_BEFORE="$(get_pvc_volume)"
+PVC_REQUEST_BEFORE="$(get_pvc_request)"
 UID_BEFORE="$(get_auth_uid)"
 check "bound PVC ${PVC_NAME} present before upgrade" test -n "$PVC_BEFORE"
+check "PVC ${PVC_NAME} request recorded before upgrade" test -n "$PVC_REQUEST_BEFORE"
 
 echo
 echo "--- 2. Seed operator-managed and LMDB-native data ---"
@@ -202,6 +246,13 @@ else
   bad "pdns-auth pod was not replaced (uid '${UID_BEFORE}' -> '${UID_AFTER}')"
 fi
 expect_eq "pdns-auth PVC volume unchanged across upgrade" "$(get_pvc_volume)" "$PVC_BEFORE"
+PVC_REQUEST_AFTER="$(get_pvc_request)"
+check "PVC ${PVC_NAME} request present after upgrade" test -n "$PVC_REQUEST_AFTER"
+if [[ "$PVC_REQUEST_BEFORE" != "$PVC_REQUEST_AFTER" ]]; then
+  ok "PVC request expanded (${PVC_REQUEST_BEFORE} -> ${PVC_REQUEST_AFTER})"
+else
+  ok "PVC request unchanged (${PVC_REQUEST_AFTER})"
+fi
 
 echo
 echo "--- 4. Verify data continuity ---"
@@ -224,7 +275,7 @@ echo "--- 5. Roll back to baseline package ---"
 # before/under the candidate. This is intentionally NOT a general cross-version downgrade
 # guarantee — it must not be repointed across an on-disk LMDB schema boundary (e.g. 5.0).
 UID_CANDIDATE="$UID_AFTER"
-apply_tree "$BASELINE_DIR"
+apply_rollback_tree "$BASELINE_DIR" "$PVC_REQUEST_AFTER"
 GEN_RB="$("$KUBECTL" get deployment pdns-auth -n "$NAMESPACE" -o jsonpath='{.metadata.generation}' 2>/dev/null || echo 0)"
 OBS_RB="$("$KUBECTL" get deployment pdns-auth -n "$NAMESPACE" -o jsonpath='{.status.observedGeneration}' 2>/dev/null || echo 0)"
 check "pdns-auth observedGeneration caught up after rollback" test "$OBS_RB" -ge "$GEN_RB"

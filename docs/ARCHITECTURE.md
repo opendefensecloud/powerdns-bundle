@@ -225,7 +225,7 @@ At container startup, the Recursor entrypoint replaces `__PDNS_AUTH_SERVICE_HOST
 | **AFO reference** | AFO-005 |
 
 For the decision rationale and evaluated alternatives, see [ADR-002](ADR-002-LMDB-DATA-STORE.md).
-PowerDNS Authoritative and the Lightning Stream sidecar run with the same UID/GID and the same 1000 MB LMDB map size so both processes can safely open the shared LMDB environment.
+PowerDNS Authoritative and the Lightning Stream sidecar run with the same UID/GID and the same 1000 MB LMDB map size so both processes can safely open the shared LMDB environment. For KRO-managed instances, this value is a single schema field (`lmdbMapSizeMB`, see §5.1); for the static base manifests it is cross-checked automatically by `hack/validate-lmdb-config.sh` in CI.
 
 ### 3.5 Lightning Stream — Replication
 
@@ -391,7 +391,7 @@ relevant to operating and tuning the data store:
 | `lmdb-filename` | `/var/lib/powerdns/pdns.lmdb` | Path to the LMDB environment file on the persistent volume. |
 | `lmdb-lightning-stream` | `yes` | Enables the on-disk layout required by the Lightning Stream sidecar. PowerDNS 4.9 removed the previous `mapasync` sync mode. |
 | `lmdb-shards` | `1` | Single shard is mandatory when `lmdb-lightning-stream=yes`. |
-| `lmdb-map-size` | `1000` (MB) | Maximum size of the LMDB environment. **Must match** the Lightning Stream `map_size` (see below) so both processes can open the same environment. |
+| `lmdb-map-size` | `1000` (MB) | Maximum size of the LMDB environment. **Must match** the Lightning Stream `map_size` (see below) so both processes can open the same environment. In KRO-managed instances this is driven by the single `lmdbMapSizeMB` schema field (`PowerDNSInstance`, default `1000`); in the static base manifests it is a plain value cross-checked against `configmap-lightningstream.yaml` by `hack/validate-lmdb-config.sh` (run in CI). |
 
 The Lightning Stream sidecar
 (`deploy/base/authoritative/configmap-lightningstream.yaml`) opens the same two
@@ -408,16 +408,18 @@ LMDB files and must use an identical map size:
 
 > **Important:** `lmdb-map-size` (Auth) and `map_size` (Lightning Stream) must
 > always be changed together. A mismatch prevents one of the two processes from
-> opening the shared environment.
+> opening the shared environment. `hack/validate-lmdb-config.sh` enforces this
+> for the static base manifests, and rejects any stray hardcoded value in the
+> KRO `ResourceGraphDefinition` that bypasses the `lmdbMapSizeMB` schema field.
 
 ### 5.2 Storage, permissions, and recovery
 
 | Aspect | Configuration |
 |---|---|
-| **Persistent volume** | `PersistentVolumeClaim` `pdns-auth-data`, `1Gi`, `ReadWriteOnce` (`deploy/base/authoritative/pvc.yaml`). Resize by increasing `resources.requests.storage`; raise `lmdb-map-size`/`map_size` accordingly if zone data grows beyond ~1000 MB. |
+| **Persistent volume** | `PersistentVolumeClaim` `pdns-auth-data`, `4Gi`, `ReadWriteOnce` in the static base (`deploy/base/authoritative/pvc.yaml`). This applies a 4× sizing policy: 2× for the `main` and `shard` LMDB environments plus 2× snapshot/filesystem headroom. KRO derives the request as `lmdbMapSizeMB × 4Mi` (default `4000Mi`) so map and storage capacity cannot drift. Existing-claim expansion requires a StorageClass with `allowVolumeExpansion: true`. |
 | **Mount path** | `/var/lib/powerdns` — holds the LMDB files and the Lightning Stream snapshot directory (`/var/lib/powerdns/snapshots`, single-instance `type: fs`). |
 | **File ownership** | The pod runs with `fsGroup: 953`. A `repair-lmdb-permissions` init container runs `chown -R 953:953 /var/lib/powerdns` so the read-only-root-filesystem Auth and sidecar containers can write to the volume. |
-| **Restart behaviour** | The Auth Deployment uses the `Recreate` strategy because the `ReadWriteOnce` PVC cannot be mounted by two pods at once (see [§8.3](#83-rolling-updates)). On restart, the new pod re-opens the existing LMDB file from the PVC — no data import is required. |
+| **Restart behaviour** | The Auth Deployment uses the `Recreate` strategy because the `ReadWriteOnce` PVC cannot be mounted by two pods at once (see [§8.3](#83-rolling-updates)). Its pod template carries an LMDB config revision; changing `lmdbMapSizeMB` in KRO or shipping a new shared config revision triggers a restart so both processes load the same settings. The new pod re-opens the existing LMDB file from the PVC — no data import is required. |
 | **Recovery** | After a pod loss, zone data is restored directly from the LMDB file on the retained PVC. In multi-instance mode, a freshly provisioned instance also rebuilds its LMDB from Lightning Stream snapshots in the S3 store (see [§6](#6-replication-and-backup-lightning-stream--s3)). |
 
 Persistence, recovery, and resource consumption of this configuration are
@@ -507,12 +509,12 @@ Scenario A and C are exercised automatically by `hack/validate-replication.sh` (
 
 | Aspect | Value / Guidance |
 |---|---|
-| **Snapshot retention (`type: fs`)** | Snapshots accumulate indefinitely on the PVC. The default PVC size is 1 Gi; the snapshot directory and LMDB files share that space. Monitor with `kubectl exec … -c lightningstream -- du -sh /var/lib/powerdns/snapshots`. |
-| **Snapshot retention (`type: s3`)** | Controlled by lightningstream's `storage_gc_interval` and `storage_gc_generations` settings (not currently set explicitly; upstream defaults apply). Garage storage grows proportionally to write throughput × retention window. |
+| **Snapshot retention (`type: fs`)** | Explicit cleanup runs every `5m`, retains every snapshot for at least `10m`, and removes stale instance histories after `168h`. This prevents unbounded growth on the shared Auth PVC while leaving a download window for slow consumers. Continue monitoring with `kubectl exec … -c lightningstream -- du -sh /var/lib/powerdns/snapshots`. |
+| **Snapshot retention (`type: s3`)** | Uses the same explicit `storage.cleanup` policy (`5m` / `10m` / `168h`) in Garage. Cleanup is disabled by default in Lightning Stream 1.0.3, so these settings must remain explicit. |
 | **Tombsweeper** | Deleted DNS records are stored as tombstones to ensure convergence across replicas. The tombsweeper removes them after `tombstone_lifetime` (upstream default: 7 days). Do not manually compact or truncate the LMDB — removing tombstones before all replicas have seen them causes deleted records to reappear. |
 | **Sync latency** | End-to-end propagation is governed by `lmdb_poll_interval` (how often lightningstream polls for LMDB changes) and `storage_poll_interval` (how often it checks the S3 bucket for new snapshots from peers). Both default to `1s`; reducing below `1s` increases CPU load without meaningful latency benefit. |
-| **LMDB map size** | `lmdb-map-size` (Auth `pdns.conf`) and `map_size` (lightningstream config) must always be identical — a mismatch prevents one of the two processes from opening the shared environment. Current default: 1000 MB. Raise both together if `du -sh /var/lib/powerdns/pdns.lmdb` approaches the limit. |
-| **Garage layout capacity** | The bootstrap sidecar claims 1 GB of capacity for the single-node layout. If the `pdns-lmdb` bucket approaches this limit, increase the capacity claim in the bootstrap script and apply the new layout via `garage layout apply`. |
+| **LMDB map size** | `lmdb-map-size` (Auth `pdns.conf`) and `map_size` (lightningstream config) must always be identical — a mismatch prevents one of the two processes from opening the shared environment. Current default: 1000 MB (`lmdbMapSizeMB` schema field for KRO instances). KRO automatically requests four times that value in MiB for the Auth PVC; static deployments must preserve the same 4× policy when changing the two ConfigMaps and PVC. |
+| **Garage layout capacity** | KRO derives the single-node Garage layout capacity as `lmdbMapSizeMB × 4,000,000` bytes (4 GB at the default), matching the Auth storage policy. The bootstrap sidecar stages and applies a new layout version when the configured capacity increases. Decreasing `lmdbMapSizeMB` is unsupported because Kubernetes cannot shrink the corresponding PVC. |
 | **Garage single-node limitation** | The current Garage deployment uses `rpc_public_addr: 127.0.0.1:3901`, which confines the cluster to a single pod. Horizontal scaling of Garage is not supported in this configuration. Each `PowerDNSInstance` with `multiInstance: true` gets its own single-node Garage cluster; Garage clusters are not shared across instances. |
 
 ---

@@ -143,18 +143,18 @@ kubectl -n dns get configmap pdns-auth-config -o yaml      # lmdb-map-size
 kubectl -n dns get configmap lightningstream-config -o yaml # map_size / options.map_size
 ```
 
-Both must show the same numeric value (default: `1000` MB).
+Both must show the same numeric value (default: `1000` MB). For KRO-managed instances, this value comes from the `lmdbMapSizeMB` field on the `PowerDNSInstance` spec — both ConfigMaps, the Auth PVC request, and the Garage layout capacity are derived from it. For statically-managed `deploy/base/` manifests, `hack/validate-lmdb-config.sh` cross-checks the two ConfigMaps in CI on every change.
 
 **PVC full:**
 
-Monitor the PVC usage. LMDB files and Lightning Stream snapshots share the same `1Gi` volume. Expand if needed:
+Monitor the PVC usage. In the static deployment, LMDB files and Lightning Stream snapshots share the same `4Gi` volume. KRO requests `lmdbMapSizeMB × 4Mi` (`4000Mi` by default). Both follow the same policy: 2× for the `main` and `shard` LMDB environments plus 2× snapshot/filesystem headroom.
 
 ```bash
 kubectl -n dns exec deployment/pdns-auth -c lightningstream -- \
   du -sh /var/lib/powerdns /var/lib/powerdns/snapshots
 ```
 
-To increase: patch `spec.resources.requests.storage` on the PVC and raise `lmdb-map-size` / `map_size` in both ConfigMaps proportionally.
+For static manifests, raise both ConfigMap values and the PVC request while preserving the 4× policy. For KRO instances, change only `spec.lmdbMapSizeMB`; KRO expands the PVC automatically. Existing PVC expansion requires the claim's StorageClass to set `allowVolumeExpansion: true` (see `UPGRADE.md` §2.2).
 
 ### 2.4 Pod restart and recovery
 
@@ -214,7 +214,7 @@ kubectl -n dns edit configmap lightningstream-config    # options.map_size
 kubectl -n dns rollout restart deployment/pdns-auth
 ```
 
-Both values must always be identical.
+Both values must always be identical. For KRO-managed instances, increase `spec.lmdbMapSizeMB` on the `PowerDNSInstance` CR instead — it is the single source of truth and automatically requests four times that value in MiB for the PVC. For static deployments, raise `pdns-auth-data` to four times the map size as well. Decreasing the map size is unsupported because the PVC cannot be shrunk and the existing LMDB data may exceed the new ceiling.
 
 ---
 
@@ -222,7 +222,7 @@ Both values must always be identical.
 
 ### 4.1 Single-instance backup
 
-In single-instance mode, Lightning Stream writes LMDB snapshots to `/var/lib/powerdns/snapshots` on the Auth pod's PVC (`type: fs`). These snapshots provide a fast restart path but are co-located with the LMDB files on the same `1 Gi` volume.
+In single-instance mode, Lightning Stream writes LMDB snapshots to `/var/lib/powerdns/snapshots` on the Auth pod's PVC (`type: fs`). These snapshots provide a fast restart path but are co-located with the LMDB files on the same Auth volume (`4Gi` in the static deployment, `4000Mi` at the default KRO map size).
 
 **Primary backup mechanism: Kubernetes CRs**
 
@@ -249,14 +249,14 @@ kubectl -n dns get pvc pdns-auth-data  # confirm PVC name
 
 ### 4.3 Monitoring snapshot accumulation
 
-Snapshots accumulate over time. Monitor available space:
+Lightning Stream cleanup is explicitly enabled for filesystem and S3 storage. It runs every `5m`, keeps snapshots for at least `10m`, and removes stale instance histories after `168h`. Monitor available space to detect unusual write volume or failed cleanup:
 
 ```bash
 kubectl -n dns exec deployment/pdns-auth -c lightningstream -- \
   du -sh /var/lib/powerdns/snapshots
 ```
 
-For multi-instance Garage storage, snapshot retention is controlled by Lightning Stream's `storage_gc_interval` and `storage_gc_generations` upstream defaults.
+Do not remove the explicit `storage.cleanup` block: cleanup is disabled by default in Lightning Stream 1.0.3.
 
 ---
 

@@ -13,6 +13,7 @@ INSTANCE_B_NAMESPACE="${INSTANCE_B_NAMESPACE:-pdns-mi-b}"
 KRO_NAMESPACE="${KRO_NAMESPACE:-default}"
 PDNS_API_KEY_A="${PDNS_API_KEY_A:-changeme-a}"
 PDNS_API_KEY_B="${PDNS_API_KEY_B:-changeme-b}"
+LMDB_MAP_SIZE_MB="${LMDB_MAP_SIZE_MB:-512}"
 VALIDATION_VERBOSE="${VALIDATION_VERBOSE:-0}"
 CREATE_INSTANCES=true
 CLEANUP=false
@@ -140,6 +141,7 @@ spec:
   namespace: ${INSTANCE_A_NAMESPACE}
   pdnsApiKey: ${PDNS_API_KEY_A}
   multiInstance: true
+  lmdbMapSizeMB: ${LMDB_MAP_SIZE_MB}
 ---
 apiVersion: kro.run/v1alpha1
 kind: PowerDNSInstance
@@ -150,7 +152,37 @@ spec:
   namespace: ${INSTANCE_B_NAMESPACE}
   pdnsApiKey: ${PDNS_API_KEY_B}
   multiInstance: true
+  lmdbMapSizeMB: ${LMDB_MAP_SIZE_MB}
 EOF
+}
+
+validate_lmdb_contract() {
+  local namespace="$1"
+  local auth_config ls_config pvc_request map_count pvc_request_mib
+  local expected_pvc_mib=$((LMDB_MAP_SIZE_MB * 4))
+  auth_config="$("$KUBECTL" get configmap pdns-auth-config -n "$namespace" \
+    -o jsonpath='{.data.pdns\.conf}')"
+  ls_config="$("$KUBECTL" get configmap lightningstream-config -n "$namespace" \
+    -o jsonpath='{.data.lightningstream\.yaml}')"
+  pvc_request="$("$KUBECTL" get pvc pdns-auth-data -n "$namespace" \
+    -o jsonpath='{.spec.resources.requests.storage}')"
+  map_count="$(grep -Ec "^[[:space:]]+map_size: ${LMDB_MAP_SIZE_MB}MB$" <<<"$ls_config" || true)"
+
+  case "$pvc_request" in
+    *Gi) pvc_request_mib=$((${pvc_request%Gi} * 1024)) ;;
+    *Mi) pvc_request_mib=${pvc_request%Mi} ;;
+    *)   pvc_request_mib="" ;;
+  esac
+
+  if [[ "$auth_config" == *"lmdb-map-size=${LMDB_MAP_SIZE_MB}"* \
+      && "$map_count" -eq 2 \
+      && "$pvc_request_mib" == "$expected_pvc_mib" ]]; then
+    return 0
+  fi
+
+  echo "expected map=${LMDB_MAP_SIZE_MB}MB, Lightning Stream matches=2, PVC=${expected_pvc_mib}Mi"
+  echo "observed Auth match=$([[ "$auth_config" == *"lmdb-map-size=${LMDB_MAP_SIZE_MB}"* ]] && echo yes || echo no), Lightning Stream matches=${map_count}, PVC=${pvc_request} (${pvc_request_mib:-unknown}Mi)"
+  return 1
 }
 
 delete_instance() {
@@ -600,7 +632,14 @@ if [[ "$FAIL" -gt "$STACK_READY_FAILURES_BEFORE" ]]; then
   print_generated_stack_diagnostics
 else
   echo
-  echo "--- 4. Operator scope guardrail ---"
+  echo "--- 4. Generated LMDB sizing contract ---"
+  for ns in "$INSTANCE_A_NAMESPACE" "$INSTANCE_B_NAMESPACE"; do
+    check "${ns}: map size and PVC derive from lmdbMapSizeMB" \
+      validate_lmdb_contract "$ns"
+  done
+
+  echo
+  echo "--- 5. Operator scope guardrail ---"
   OPERATOR_ARGS_A="$("$KUBECTL" get deployment pdns-operator -n "$INSTANCE_A_NAMESPACE" \
     -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || true)"
   OPERATOR_ARGS_B="$("$KUBECTL" get deployment pdns-operator -n "$INSTANCE_B_NAMESPACE" \
@@ -641,7 +680,7 @@ else
   done
 
   echo
-  echo "--- 5. Configuration isolation through Kubernetes API ---"
+  echo "--- 6. Configuration isolation through Kubernetes API ---"
   apply_zone_and_rrset "$INSTANCE_A_NAMESPACE" multi-a.example.com a.multi-a.example.com 192.0.2.10
   apply_zone_and_rrset "$INSTANCE_B_NAMESPACE" multi-b.example.com b.multi-b.example.com 192.0.2.20
   check "Instance A RRset reconciled" \
@@ -654,7 +693,7 @@ else
     "$KUBECTL" get zone multi-b.example.com -n "$INSTANCE_A_NAMESPACE"
 
   echo
-  echo "--- 6. Runtime isolation through PowerDNS Auth API ---"
+  echo "--- 7. Runtime isolation through PowerDNS Auth API ---"
   STEP6_FAILURES_BEFORE="$FAIL"
   check_probe_present "Instance A Auth serves only A zone" \
     auth_has_zone "$INSTANCE_A_NAMESPACE" multi-a.example.com "$PDNS_API_KEY_A"
@@ -671,7 +710,7 @@ else
   fi
 
   echo
-  echo "--- 7. Lifecycle isolation ---"
+  echo "--- 8. Lifecycle isolation ---"
   if [[ "$RUN_LIFECYCLE" == "true" ]]; then
     delete_instance "$INSTANCE_A_NAME"
     check "Instance B remains available after deleting instance A" \

@@ -11,7 +11,11 @@ data:
     # previous mapasync sync mode and requires a single shard in this mode.
     lmdb-lightning-stream=yes
     lmdb-shards=1
-    # Match Lightning Stream's LMDB map_size so both processes can open the same environment.
+    # Match Lightning Stream's LMDB map_size (MB, unit-less here) so both
+    # processes can open the same environment. Keep this numerically
+    # identical to both `map_size` values in configmap-lightningstream.yaml
+    # (checked by hack/validate-lmdb-config.sh); KRO deployments derive both
+    # from the single lmdbMapSizeMB schema field instead.
     lmdb-map-size=1000
 
     # API Configuration

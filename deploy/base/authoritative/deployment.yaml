@@ -20,6 +20,10 @@ spec:
       labels:
         app.kubernetes.io/name: pdns-auth
         app.kubernetes.io/component: dns-auth
+      annotations:
+        # Bump when the LMDB/Lightning Stream contract changes so existing
+        # pods restart and load the new ConfigMaps.
+        powerdns.cav.enablers.ob/lmdb-config-revision: "cleanup-v1-map-1000"
     spec:
       automountServiceAccountToken: false
       securityContext:

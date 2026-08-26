@@ -7,6 +7,11 @@ data:
   lightningstream.yaml: |
     # Single-instance deployment: filesystem backend on the shared data PVC (ADR-006).
     # For multi-instance, switch storage.type to s3 and add Garage credentials (ADR-003).
+    #
+    # map_size (MB) below must stay numerically identical to `lmdb-map-size`
+    # in configmap.yaml (pdns-auth-config) on both the main and shard
+    # environments — checked by hack/validate-lmdb-config.sh. KRO deployments
+    # derive both from the single lmdbMapSizeMB schema field instead.
     lmdbs:
       main:
         path: /var/lib/powerdns/pdns.lmdb
@@ -27,6 +32,13 @@ data:
       type: fs
       options:
         root_path: /var/lib/powerdns/snapshots
+      # Lightning Stream disables cleanup by default. Keep recent snapshots
+      # long enough for a slow consumer while preventing unbounded PVC growth.
+      cleanup:
+        enabled: true
+        interval: 5m
+        must_keep_interval: 10m
+        remove_old_instances_interval: 168h
 
     lmdb_poll_interval: 1s
     storage_poll_interval: 1s

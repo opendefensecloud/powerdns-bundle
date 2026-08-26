@@ -95,13 +95,36 @@ version-pinned rollback possible (see [§5](#5-rollback)).
    ```
 2. If CRDs changed, apply them **before** the operator rolls out — see
    [§4](#4-crd-versioning-and-migration-concept).
-3. Apply the updated manifests:
+3. When upgrading an installation whose `pdns-auth-data` PVC still requests
+   `1Gi`, verify that its StorageClass supports expansion before applying the
+   new `4Gi` static manifest:
+   ```sh
+   PVC_SC="$(kubectl -n dns get pvc pdns-auth-data \
+     -o jsonpath='{.spec.storageClassName}')"
+   kubectl get storageclass "$PVC_SC" \
+     -o jsonpath='allowVolumeExpansion={.allowVolumeExpansion}{"\n"}'
+   ```
+   Continue only when this prints `allowVolumeExpansion=true`. Otherwise,
+   snapshot or back up the LMDB data and migrate the claim to an expandable
+   StorageClass according to the storage provider's procedure. Kubernetes
+   cannot change the StorageClass of an existing claim.
+4. Apply the updated manifests:
    - **Online:** `kubectl apply -k deploy/`
    - **Air-gap:** `kubectl apply -k deploy/overlays/air-gap/`
-4. Kubernetes performs rolling updates automatically per the strategy in
+5. Confirm that the requested and provisioned capacity reached the new value:
+   ```sh
+   kubectl -n dns get pvc pdns-auth-data \
+     -o custom-columns=NAME:.metadata.name,REQUEST:.spec.resources.requests.storage,CAPACITY:.status.capacity.storage
+   ```
+   A `FileSystemResizePending` condition means the provider is waiting for a
+   pod remount. This release changes the Auth pod's LMDB config revision and
+   therefore triggers a `Recreate` rollout. If the condition remains afterward,
+   run `kubectl -n dns rollout restart deployment/pdns-auth` and wait for the
+   rollout to complete.
+6. Kubernetes performs rolling updates automatically per the strategy in
    [`ARCHITECTURE.md` §8.3](ARCHITECTURE.md#83-rolling-updates). The
    Authoritative Server uses `Recreate` and incurs brief downtime.
-5. Validate the upgrade — see [§7](#7-upgrade-validation).
+7. Validate the upgrade — see [§7](#7-upgrade-validation).
 
 ---
 
@@ -185,6 +208,14 @@ For an upgrade that included a CRD storage migration or a persistent-data format
 change, rollback is **not** a simple redeploy: it requires a backup / restore or
 a dedicated downgrade procedure. Take the backups described in
 [§6](#6-scope-and-impact-of-manual-steps) before any such upgrade.
+
+PVC expansion is also irreversible. After upgrading the Auth claim from `1Gi`
+to `4Gi`, a previous manifest that still requests `1Gi` is rejected because
+Kubernetes does not support shrinking claims. A rollback must preserve the live
+PVC request: patch the previous static `deploy/base/authoritative/pvc.yaml` (and
+the previous KRO `pvcAuthData` template when that RGD is redeployed) to the
+current or a larger size before applying it. The older application version can
+use the larger volume safely.
 
 ---
 

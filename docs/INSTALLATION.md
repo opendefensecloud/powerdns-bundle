@@ -31,7 +31,7 @@ This guide walks through deploying the PowerDNS bundle on a Kubernetes cluster u
 |---|---|
 | Kubernetes | 1.27 or later |
 | KRO | Installed and running (`kubectl get crd resourcegraphdefinitions.kro.run` must succeed) |
-| StorageClass | At least one `ReadWriteOnce`-capable StorageClass must exist; the default StorageClass is used unless overridden |
+| StorageClass | At least one `ReadWriteOnce`-capable StorageClass must exist; the default StorageClass is used unless overridden. Existing installations upgrading from the previous 1Gi Auth PVC require `allowVolumeExpansion: true` (see `UPGRADE.md` §2.2). |
 | Internet access | Required for online installation (images pulled from upstream registries); see [Section 6](#6-air-gap-deployment) for air-gap |
 
 ### Network
@@ -78,11 +78,21 @@ spec:
   namespace: dns        # target namespace — all DNS components are deployed here
   pdnsApiKey: changeme  # replace with a strong random key
   multiInstance: false
+  lmdbMapSizeMB: 1000   # default; provisions a 4000Mi Auth PVC automatically
 ```
 
 ```bash
 kubectl apply -f powerdns-instance.yaml
 ```
+
+`lmdbMapSizeMB` is the single map-size setting for PowerDNS and Lightning
+Stream (minimum `256`, default `1000`). KRO provisions 4Mi of Auth PVC capacity
+per configured MB: two shares for the `main` and `shard` LMDB environments and
+two shares for snapshots and storage overhead. Increasing the map size therefore
+expands the PVC and, in multi-instance mode, the Garage layout capacity in
+lockstep. The cluster StorageClass must allow expansion when changing this field
+on an existing instance. Map size and persistent storage can only be increased;
+Kubernetes does not support shrinking an existing PVC.
 
 You can also use the bundled reference example directly:
 
@@ -161,6 +171,7 @@ spec:
   namespace: dns-a
   pdnsApiKey: changeme-a   # replace
   multiInstance: true
+  lmdbMapSizeMB: 1000
 
 ---
 # dns-b.yaml
@@ -173,6 +184,7 @@ spec:
   namespace: dns-b
   pdnsApiKey: changeme-b   # replace
   multiInstance: true
+  lmdbMapSizeMB: 1000
 ```
 
 ```bash
