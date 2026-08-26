@@ -16,7 +16,10 @@
 # stdlib findings but the base image still carries the x/crypto findings
 # below plus a handful of new findings (golang.org/x/net, util-linux) with
 # no upstream-rebuilt tag available yet; all are suppressed below pending a
-# future Lightning Stream release.
+# future Lightning Stream release. On 2026-08-26 a new OpenSSL finding
+# (CVE-2026-14456) surfaced on the same 1.0.3 digest (Debian trixie fix
+# 3.5.7-1~deb13u2 not yet baked into any published lightningstream tag)
+# and was added below.
 #
 # Review/renewal date: 2026-09-05
 vulnerabilities:
@@ -91,4 +94,10 @@ vulnerabilities:
     # HIGH in util-linux/mount (lightningstream base image)
     statement: >-
       Follow-up TOCTOU variant grouped with CVE-2026-53612/53613/53614. Not exploitable in the lightningstream container for the same reasons: no local multi-user access. No patched Debian trixie package is published yet.
+    expired-at: 2026-09-05
+  # --- lightningstream 1.0.3: new OpenSSL finding surfaced by CI on 2026-08-26 (no new upstream tag yet) ---
+  - id: CVE-2026-14456
+    # HIGH in openssl/libssl3t64/openssl-provider-legacy (lightningstream base image)
+    statement: >-
+      OpenSSL denial of service via unbounded memory growth in the QUIC server implementation. Lightning Stream links OpenSSL only as an HTTP/TLS client for S3 replication traffic; it does not run a QUIC server, so the vulnerable server-side code path is never exercised. Fixed in Debian trixie package 3.5.7-1~deb13u2, not yet present in the current powerdns/lightningstream:1.0.3 image (still 3.5.6-1~deb13u2 as of 2026-08-26); no newer upstream lightningstream tag has been published.
     expired-at: 2026-09-05
