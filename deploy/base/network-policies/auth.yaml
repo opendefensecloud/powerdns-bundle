@@ -46,3 +46,12 @@ spec:
       ports:
         - protocol: TCP
           port: 8081
+    # Lightning Stream sidecar metrics (/metrics) and health (/healthz).
+    # Scraped from the monitoring namespace only; the operator has no use for it.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network-policy/monitoring: "true"
+      ports:
+        - protocol: TCP
+          port: 8500

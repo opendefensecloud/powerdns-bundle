@@ -124,7 +124,21 @@ version-pinned rollback possible (see [§5](#5-rollback)).
 6. Kubernetes performs rolling updates automatically per the strategy in
    [`ARCHITECTURE.md` §8.3](ARCHITECTURE.md#83-rolling-updates). The
    Authoritative Server uses `Recreate` and incurs brief downtime.
-7. Validate the upgrade — see [§7](#7-upgrade-validation).
+7. This release also renames the Lightning Stream instance from the pod name to
+   the stable `pdns-auth-<namespace>`. The snapshots written under the previous
+   pod-derived names are not deleted immediately: they become "old instances"
+   and are removed by `storage.cleanup` once
+   `remove_old_instances_interval` (`168h`) has elapsed *and* the new instance
+   has merged them. No action is required; expect the snapshot directory (or
+   Garage bucket) to stay at its pre-upgrade size for up to seven days.
+8. Confirm the sync sidecar came up with its new metrics listener:
+   ```sh
+   kubectl -n dns get deployment pdns-auth \
+     -o jsonpath='{.spec.template.spec.containers[?(@.name=="lightningstream")].ports[0].containerPort}{"\n"}'
+   ```
+   This must print `8500`. If a NetworkPolicy or scrape config in your cluster
+   pins the Authoritative Service ports explicitly, add `8500` there as well.
+9. Validate the upgrade — see [§7](#7-upgrade-validation).
 
 ---
 

@@ -77,16 +77,45 @@ else
   bad "lmdb-map-size/map_size values disagree - auth=${auth_values:-missing}, lightningstream=$(printf '%s' "$ls_values" | tr '\n' ',')"
 fi
 
-if grep -Eq -- '^[[:space:]]+storage: 4Gi$' "${ROOT_DIR}/${AUTH_PVC}"; then
-  ok "static Auth PVC applies the 4Gi default sizing policy"
+if [[ -n "$auth_value" ]]; then
+  # Both the PVC size and the rollout revision are functions of the map size,
+  # so derive the expectations rather than hardcoding them here: raising the
+  # static default then fails with an actionable message instead of a
+  # mismatch against a stale literal.
+  expected_pvc_mib=$((auth_value * 4))
+  expected_revision="ls-v2-map-${auth_value}"
+  expected_ls_memory_mib=$((auth_value / 2))
 else
-  bad "static Auth PVC must request 4Gi for the 1000 MB map default"
+  expected_pvc_mib=""
+  expected_revision=""
+  expected_ls_memory_mib=""
 fi
 
-if grep -Fq -- 'powerdns.cav.enablers.ob/lmdb-config-revision: "cleanup-v1-map-1000"' "${ROOT_DIR}/${AUTH_DEPLOYMENT}"; then
-  ok "static Auth deployment reloads the current LMDB config revision"
+static_pvc="$(extract_numbers '^[[:space:]]+storage: [0-9]+(Gi|Mi)$' "$AUTH_PVC")"
+static_pvc_unit="$(grep -Eo -- '^[[:space:]]+storage: [0-9]+(Gi|Mi)$' "${ROOT_DIR}/${AUTH_PVC}" | grep -Eo '(Gi|Mi)$' || true)"
+if [[ "$static_pvc_unit" == "Gi" ]]; then
+  static_pvc_mib=$((static_pvc * 1024))
 else
-  bad "static Auth deployment is missing the LMDB config revision"
+  static_pvc_mib="$static_pvc"
+fi
+if [[ -n "$expected_pvc_mib" && "${static_pvc_mib:-0}" -ge "$expected_pvc_mib" ]]; then
+  ok "static Auth PVC (${static_pvc}${static_pvc_unit}) covers the 4x sizing policy for ${auth_value} MB"
+else
+  bad "static Auth PVC must request at least ${expected_pvc_mib:-?}Mi for a ${auth_value:-?} MB map, found ${static_pvc:-none}${static_pvc_unit}"
+fi
+
+if [[ -n "$expected_revision" ]] \
+  && grep -Fq -- "powerdns.cav.enablers.ob/lmdb-config-revision: \"${expected_revision}\"" "${ROOT_DIR}/${AUTH_DEPLOYMENT}"; then
+  ok "static Auth deployment reloads the current LMDB config revision (${expected_revision})"
+else
+  bad "static Auth deployment must carry lmdb-config-revision \"${expected_revision:-?}\""
+fi
+
+if [[ -n "$expected_ls_memory_mib" ]] \
+  && grep -Fq -- "memory: ${expected_ls_memory_mib}Mi" "${ROOT_DIR}/${AUTH_DEPLOYMENT}"; then
+  ok "static Lightning Stream memory limit scales with the map size (${expected_ls_memory_mib}Mi)"
+else
+  bad "static Lightning Stream memory limit must be ${expected_ls_memory_mib:-?}Mi for a ${auth_value:-?} MB map"
 fi
 
 echo
@@ -140,10 +169,16 @@ else
   bad "KRO Auth PVC capacity is not derived from lmdbMapSizeMB"
 fi
 
-if grep -Fq -- 'powerdns.cav.enablers.ob/lmdb-config-revision: "cleanup-v1-map-${string(schema.spec.lmdbMapSizeMB)}"' "${ROOT_DIR}/${KRO_RGD}"; then
+if grep -Fq -- 'powerdns.cav.enablers.ob/lmdb-config-revision: "ls-v2-map-${string(schema.spec.lmdbMapSizeMB)}"' "${ROOT_DIR}/${KRO_RGD}"; then
   ok "KRO Auth rollout revision tracks lmdbMapSizeMB"
 else
   bad "KRO Auth rollout revision does not track lmdbMapSizeMB"
+fi
+
+if grep -Fq -- 'memory: "${string(schema.spec.lmdbMapSizeMB / 2)}Mi"' "${ROOT_DIR}/${KRO_RGD}"; then
+  ok "KRO Lightning Stream memory limit is derived from lmdbMapSizeMB"
+else
+  bad "KRO Lightning Stream memory limit is not derived from lmdbMapSizeMB"
 fi
 
 if grep -Fq -- 'capacity:${string(schema.spec.lmdbMapSizeMB * 4000000)},' "${ROOT_DIR}/${KRO_RGD}"; then
@@ -183,6 +218,69 @@ if [[ "$cleanup_blocks" -eq 3 && "$cleanup_enabled" -eq 3 && "$cleanup_intervals
   ok "snapshot cleanup is enabled with bounded retention in all 3 storage configurations"
 else
   bad "snapshot cleanup contract incomplete (blocks=${cleanup_blocks}, enabled=${cleanup_enabled}, intervals=${cleanup_intervals}, retention-settings=${cleanup_retention})"
+fi
+
+echo
+echo "--- Lightning Stream sidecar contract ---"
+
+# Lightning Stream keeps snapshot buffers in memory per LMDB, and this bundle
+# configures two (main + shard). Without explicit bounds the upstream defaults
+# dominate the sidecar's memory profile and can OOMKill it at larger map sizes,
+# which silently stops replication.
+ls_http="$(
+  grep -Eh -- '^[[:space:]]+address: ":8500"$' \
+    "${ROOT_DIR}/${LS_CONFIGMAP}" "${ROOT_DIR}/${KRO_RGD}" | grep -c . || true
+)"
+ls_buffers="$(
+  grep -Eh -- '^[[:space:]]+memory_downloaded_snapshots: 2$|^[[:space:]]+memory_decompressed_snapshots: 1$' \
+    "${ROOT_DIR}/${LS_CONFIGMAP}" "${ROOT_DIR}/${KRO_RGD}" | grep -c . || true
+)"
+if [[ "$ls_http" -eq 3 ]]; then
+  ok "Lightning Stream exposes metrics/healthz in all 3 storage configurations"
+else
+  bad "expected 3 Lightning Stream http.address entries, found ${ls_http}"
+fi
+if [[ "$ls_buffers" -eq 6 ]]; then
+  ok "Lightning Stream snapshot memory buffers are bounded in all 3 storage configurations"
+else
+  bad "expected 6 snapshot buffer settings across the Lightning Stream configs, found ${ls_buffers}"
+fi
+
+ls_ports="$(
+  grep -Eh -- '^[[:space:]]+containerPort: 8500$' \
+    "${ROOT_DIR}/${AUTH_DEPLOYMENT}" "${ROOT_DIR}/${KRO_RGD}" | grep -c . || true
+)"
+ls_probes="$(
+  grep -Eh -- '^[[:space:]]+port: ls-metrics$' \
+    "${ROOT_DIR}/${AUTH_DEPLOYMENT}" "${ROOT_DIR}/${KRO_RGD}" | grep -c . || true
+)"
+if [[ "$ls_ports" -eq 2 ]]; then
+  ok "both Auth deployments declare the Lightning Stream metrics port"
+else
+  bad "expected 2 Lightning Stream containerPort declarations, found ${ls_ports}"
+fi
+# Two probes per deployment plus the Service targetPort in the RGD.
+if [[ "$ls_probes" -ge 4 ]]; then
+  ok "Lightning Stream liveness and readiness probes are wired to the metrics port"
+else
+  bad "expected at least 4 ls-metrics port references for probes, found ${ls_probes}"
+fi
+
+# A pod-name-derived instance mints a new Lightning Stream identity on every
+# restart, orphaning the previous instance's final snapshot until
+# remove_old_instances_interval elapses.
+stable_instances="$(
+  grep -Eh -- '^[[:space:]]+- pdns-auth-\$\(POD_NAMESPACE\)$' \
+    "${ROOT_DIR}/${AUTH_DEPLOYMENT}" "${ROOT_DIR}/${KRO_RGD}" | grep -c . || true
+)"
+podname_instances="$(
+  grep -Eh -- '^[[:space:]]+- \$\(POD_NAME\)$' \
+    "${ROOT_DIR}/${AUTH_DEPLOYMENT}" "${ROOT_DIR}/${KRO_RGD}" | grep -c . || true
+)"
+if [[ "$stable_instances" -eq 2 && "$podname_instances" -eq 0 ]]; then
+  ok "Lightning Stream uses a stable instance name in both Auth deployments"
+else
+  bad "Lightning Stream instance name must be stable (stable=${stable_instances}, pod-name-derived=${podname_instances})"
 fi
 
 echo

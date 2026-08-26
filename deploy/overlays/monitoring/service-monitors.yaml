@@ -29,6 +29,10 @@ spec:
     - port: api
       path: /metrics
       interval: 30s
+    # Lightning Stream sidecar: replication lag, snapshot and storage errors.
+    - port: ls-metrics
+      path: /metrics
+      interval: 30s
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

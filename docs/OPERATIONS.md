@@ -258,6 +258,28 @@ kubectl -n dns exec deployment/pdns-auth -c lightningstream -- \
 
 Do not remove the explicit `storage.cleanup` block: cleanup is disabled by default in Lightning Stream 1.0.3.
 
+### 4.4 Monitoring replication health
+
+The Lightning Stream sidecar serves Prometheus metrics, a `/healthz` endpoint and a status page on port `8500` (`ls-metrics`). This is the primary signal that replication is working — the sidecar fails *quietly*, so a stalled sync (full PVC, unreachable Garage, invalid credentials) is otherwise invisible until zone data diverges.
+
+```bash
+# Expose the sidecar endpoints locally (no in-container tooling required)
+kubectl -n dns port-forward deployment/pdns-auth 8500:8500
+
+# Prometheus metrics (also scraped automatically by the packaged ServiceMonitor)
+curl -s http://localhost:8500/metrics
+
+# Aggregated health: 200 = healthy, 503 = sustained storage failure
+curl -so /dev/null -w '%{http_code}\n' http://localhost:8500/healthz
+
+# Snapshots currently visible in the storage backend
+open http://localhost:8500/storage
+```
+
+The container probes intentionally test only that the listener is up. `/healthz` reports `503` after roughly five minutes of failing storage operations; wiring readiness to it would evict a still-serving Authoritative Server from its Service and turn degraded replication into a DNS outage. Alert on `/healthz` and on the storage error metrics instead of failing the pod.
+
+If the sidecar is `OOMKilled`, raise `lmdbMapSizeMB` headroom rather than the limit alone — the limit is derived from it (`lmdbMapSizeMB / 2` MiB). For static deployments, raise the `lightningstream` container memory limit and the PVC together, preserving the documented ratios.
+
 ---
 
 ## 5 Update Procedures

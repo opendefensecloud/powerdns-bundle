@@ -63,6 +63,21 @@ check_pattern "KRO includes the Operator metrics Service" \
   '^[[:space:]]+- id: serviceOperatorMetrics$' deploy/kro/powerdns-instance-rgd.yaml
 
 echo
+echo "--- Lightning Stream sync metrics ---"
+# The sync sidecar fails silently (stalled replication, full PVC), so its
+# metrics endpoint must stay wired end to end: config -> Service -> scrape.
+check_count "both Auth Services expose the Lightning Stream metrics port" \
+  '^[[:space:]]+- name: ls-metrics$' 1 deploy/base/authoritative/service.yaml
+check_pattern "KRO Auth Service exposes the Lightning Stream metrics port" \
+  '^[[:space:]]+targetPort: ls-metrics$' deploy/kro/powerdns-instance-rgd.yaml
+check_pattern "Authoritative ServiceMonitor scrapes the sync sidecar" \
+  '^[[:space:]]+- port: ls-metrics$' deploy/overlays/monitoring/service-monitors.yaml
+check_pattern "NetworkPolicy admits monitoring to the sync metrics port" \
+  '^[[:space:]]+port: 8500$' deploy/base/network-policies/auth.yaml
+check_pattern "live validation scrapes the sync sidecar endpoint" \
+  'check_metrics "Lightning Stream"' hack/validate-observability.sh
+
+echo
 echo "--- Prometheus discovery ---"
 check_count "Authoritative Service enables annotation-based discovery" \
   '^[[:space:]]+prometheus.io/scrape: "true"$' 1 deploy/base/authoritative/service.yaml

@@ -234,6 +234,8 @@ PowerDNS Authoritative and the Lightning Stream sidecar run with the same UID/GI
 | **Function** | Synchronizes LMDB databases between Auth instances via S3 snapshots. Multi-writer, eventual consistency. |
 | **OSS project** | [PowerDNS/lightningstream](https://github.com/PowerDNS/lightningstream) |
 | **Deployment** | Sidecar container alongside each Auth pod |
+| **Instance name** | `pdns-auth-<namespace>` — must be unique *and* stable (see [§6](#6-replication-and-backup-lightning-stream--s3)). |
+| **Ports** | `:8500` — Prometheus `/metrics`, `/healthz`, and a `/storage` snapshot status page. |
 | **AFO reference** | AFO-006 |
 
 For details on the sync mechanism, see [Section 6](#6-replication-and-backup-lightning-stream--s3).
@@ -405,6 +407,9 @@ LMDB files and must use an identical map size:
 | `options.no_subdir` | `true` | LMDB stored as a single file, not a directory. |
 | `schema_tracks_changes` | `true` | Lets Lightning Stream detect changes via the LMDB schema. |
 | `lmdb_poll_interval` | `1s` | How often the sidecar polls the LMDB for changes. |
+| `memory_downloaded_snapshots` | `2` | Compressed snapshot buffers held in memory **per LMDB**. Two slots let one slow download proceed without stalling the other peers. |
+| `memory_decompressed_snapshots` | `1` | Decompressed snapshot buffers **per LMDB**. Decompressed snapshots are 3–10× the compressed size, so the upstream default of `3` dominates the sidecar's memory profile; one buffer per LMDB bounds it. |
+| `http.address` | `:8500` | Enables `/metrics`, `/healthz` and the status page. Disabled upstream unless set. |
 
 > **Important:** `lmdb-map-size` (Auth) and `map_size` (Lightning Stream) must
 > always be changed together. A mismatch prevents one of the two processes from
@@ -514,6 +519,8 @@ Scenario A and C are exercised automatically by `hack/validate-replication.sh` (
 | **Tombsweeper** | Deleted DNS records are stored as tombstones to ensure convergence across replicas. The tombsweeper removes them after `tombstone_lifetime` (upstream default: 7 days). Do not manually compact or truncate the LMDB — removing tombstones before all replicas have seen them causes deleted records to reappear. |
 | **Sync latency** | End-to-end propagation is governed by `lmdb_poll_interval` (how often lightningstream polls for LMDB changes) and `storage_poll_interval` (how often it checks the S3 bucket for new snapshots from peers). Both default to `1s`; reducing below `1s` increases CPU load without meaningful latency benefit. |
 | **LMDB map size** | `lmdb-map-size` (Auth `pdns.conf`) and `map_size` (lightningstream config) must always be identical — a mismatch prevents one of the two processes from opening the shared environment. Current default: 1000 MB (`lmdbMapSizeMB` schema field for KRO instances). KRO automatically requests four times that value in MiB for the Auth PVC; static deployments must preserve the same 4× policy when changing the two ConfigMaps and PVC. |
+| **Sidecar memory** | Lightning Stream buffers snapshots in memory while merging, and does so *per LMDB* — this bundle configures two (`main` + `shard`). The sidecar's memory limit is therefore derived from the map size (`lmdbMapSizeMB / 2` MiB, i.e. `500Mi` at the default) rather than fixed, so raising `lmdbMapSizeMB` cannot silently produce an OOMKilled sidecar and a stalled replication. Static deployments must preserve the same ratio. |
+| **Instance identity** | The sidecar is started with `--instance pdns-auth-$(POD_NAMESPACE)`. Lightning Stream requires the instance name to be unique, and this bundle additionally requires it to be *stable*: a pod-name-derived name registers a new instance on every rollout, and each retired instance's final snapshot is retained until `remove_old_instances_interval` elapses. The Auth Deployment is pinned to a single replica (Recreate + `ReadWriteOnce` PVC), so the namespace is a safe stable identity. If the replica count ever exceeds 1, the name must become per-pod again. |
 | **Garage layout capacity** | KRO derives the single-node Garage layout capacity as `lmdbMapSizeMB × 4,000,000` bytes (4 GB at the default), matching the Auth storage policy. The bootstrap sidecar stages and applies a new layout version when the configured capacity increases. Decreasing `lmdbMapSizeMB` is unsupported because Kubernetes cannot shrink the corresponding PVC. |
 | **Garage single-node limitation** | The current Garage deployment uses `rpc_public_addr: 127.0.0.1:3901`, which confines the cluster to a single pod. Horizontal scaling of Garage is not supported in this configuration. Each `PowerDNSInstance` with `multiInstance: true` gets its own single-node Garage cluster; Garage clusters are not shared across instances. |
 
@@ -753,7 +760,7 @@ The separation is enforced at the Kubernetes workload level. Each function runs 
 | Process | `pdns_recursor` (caching resolver) | `pdns_server` + LMDB backend |
 | ConfigMap | `pdns-recursor-config` | `pdns-auth-config` |
 | Persistent storage | None (in-memory cache only) | PVC `pdns-auth-data` (LMDB) |
-| Network service | `ClusterIP :53` | `ClusterIP :53`, `:8081` |
+| Network service | `ClusterIP :53` | `ClusterIP :53`, `:8081`, `:8500` (Lightning Stream metrics) |
 | Kubernetes service | `pdns-recursor.dns.svc.cluster.local` | `pdns-auth.dns.svc.cluster.local` |
 | Manifest path | `deploy/base/recursor/` | `deploy/base/authoritative/` |
 
@@ -816,14 +823,14 @@ Liveness and Readiness Probes are configured for all Deployments where a health 
 | PowerDNS Recursor | TCPSocket `:53` | TCPSocket `:53` |
 | PowerDNS Authoritative | TCPSocket `:53` | TCPSocket `:8081` (management API port) |
 | PowerDNS Operator | HTTPGet `:8081 /healthz` | HTTPGet `:8081 /readyz` |
-| Lightning Stream (sidecar) | — | — |
+| Lightning Stream (sidecar) | TCPSocket `:8500` | TCPSocket `:8500` |
 
 **Rationale:**
 
 - **dnsdist / Recursor:** A listening TCP port 53 is the minimal reachability check. Both components serve DNS over TCP as well as UDP; an open socket confirms the process is operational.
 - **Authoritative Server:** Liveness checks the DNS listener (`:53`); readiness checks the management API port (`:8081`), ensuring the Operator can reach the API before traffic is routed.
 - **Operator:** Uses the standard controller-runtime health endpoints (`/healthz`, `/readyz`) on the dedicated health port (`:8081`).
-- **Lightning Stream:** No health endpoint is exposed by this sidecar. Kubernetes restarts the container on crash without a probe.
+- **Lightning Stream:** The sidecar serves `/metrics`, `/healthz` and a status page on `:8500` once `http.address` is set (the endpoint is disabled by default upstream). Both probes deliberately use a TCP check on that port rather than `/healthz`: `/healthz` returns `503` after a sustained storage outage, so gating readiness on it would remove a still-serving Authoritative Server from its Service and escalate degraded replication into a DNS outage. Replication health is surfaced through Prometheus instead (see §8.1).
 
 **Timing parameters:**
 

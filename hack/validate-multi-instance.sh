@@ -159,13 +159,19 @@ EOF
 validate_lmdb_contract() {
   local namespace="$1"
   local auth_config ls_config pvc_request map_count pvc_request_mib
+  local ls_memory ls_memory_mib instance_arg
   local expected_pvc_mib=$((LMDB_MAP_SIZE_MB * 4))
+  local expected_memory_mib=$((LMDB_MAP_SIZE_MB / 2))
   auth_config="$("$KUBECTL" get configmap pdns-auth-config -n "$namespace" \
     -o jsonpath='{.data.pdns\.conf}')"
   ls_config="$("$KUBECTL" get configmap lightningstream-config -n "$namespace" \
     -o jsonpath='{.data.lightningstream\.yaml}')"
   pvc_request="$("$KUBECTL" get pvc pdns-auth-data -n "$namespace" \
     -o jsonpath='{.spec.resources.requests.storage}')"
+  ls_memory="$("$KUBECTL" get deployment pdns-auth -n "$namespace" \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="lightningstream")].resources.limits.memory}')"
+  instance_arg="$("$KUBECTL" get deployment pdns-auth -n "$namespace" \
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="lightningstream")].args}')"
   map_count="$(grep -Ec "^[[:space:]]+map_size: ${LMDB_MAP_SIZE_MB}MB$" <<<"$ls_config" || true)"
 
   case "$pvc_request" in
@@ -173,15 +179,22 @@ validate_lmdb_contract() {
     *Mi) pvc_request_mib=${pvc_request%Mi} ;;
     *)   pvc_request_mib="" ;;
   esac
+  case "$ls_memory" in
+    *Gi) ls_memory_mib=$((${ls_memory%Gi} * 1024)) ;;
+    *Mi) ls_memory_mib=${ls_memory%Mi} ;;
+    *)   ls_memory_mib="" ;;
+  esac
 
   if [[ "$auth_config" == *"lmdb-map-size=${LMDB_MAP_SIZE_MB}"* \
       && "$map_count" -eq 2 \
-      && "$pvc_request_mib" == "$expected_pvc_mib" ]]; then
+      && "$pvc_request_mib" == "$expected_pvc_mib" \
+      && "$ls_memory_mib" == "$expected_memory_mib" \
+      && "$instance_arg" == *"pdns-auth-\$(POD_NAMESPACE)"* ]]; then
     return 0
   fi
 
-  echo "expected map=${LMDB_MAP_SIZE_MB}MB, Lightning Stream matches=2, PVC=${expected_pvc_mib}Mi"
-  echo "observed Auth match=$([[ "$auth_config" == *"lmdb-map-size=${LMDB_MAP_SIZE_MB}"* ]] && echo yes || echo no), Lightning Stream matches=${map_count}, PVC=${pvc_request} (${pvc_request_mib:-unknown}Mi)"
+  echo "expected map=${LMDB_MAP_SIZE_MB}MB, Lightning Stream matches=2, PVC=${expected_pvc_mib}Mi, sidecar memory=${expected_memory_mib}Mi, stable instance name"
+  echo "observed Auth match=$([[ "$auth_config" == *"lmdb-map-size=${LMDB_MAP_SIZE_MB}"* ]] && echo yes || echo no), Lightning Stream matches=${map_count}, PVC=${pvc_request} (${pvc_request_mib:-unknown}Mi), sidecar memory=${ls_memory:-none} (${ls_memory_mib:-unknown}Mi), args=${instance_arg}"
   return 1
 }
 
@@ -632,9 +645,9 @@ if [[ "$FAIL" -gt "$STACK_READY_FAILURES_BEFORE" ]]; then
   print_generated_stack_diagnostics
 else
   echo
-  echo "--- 4. Generated LMDB sizing contract ---"
+  echo "--- 4. Generated LMDB sizing and Lightning Stream contract ---"
   for ns in "$INSTANCE_A_NAMESPACE" "$INSTANCE_B_NAMESPACE"; do
-    check "${ns}: map size and PVC derive from lmdbMapSizeMB" \
+    check "${ns}: map size, PVC and sidecar memory derive from lmdbMapSizeMB" \
       validate_lmdb_contract "$ns"
   done
 

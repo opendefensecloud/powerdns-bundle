@@ -27,3 +27,8 @@ spec:
       port: 8081
       targetPort: api
       protocol: TCP
+    # Lightning Stream sync metrics (/metrics) and health (/healthz).
+    - name: ls-metrics
+      port: 8500
+      targetPort: ls-metrics
+      protocol: TCP

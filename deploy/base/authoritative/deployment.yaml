@@ -23,7 +23,7 @@ spec:
       annotations:
         # Bump when the LMDB/Lightning Stream contract changes so existing
         # pods restart and load the new ConfigMaps.
-        powerdns.cav.enablers.ob/lmdb-config-revision: "cleanup-v1-map-1000"
+        powerdns.cav.enablers.ob/lmdb-config-revision: "ls-v2-map-1000"
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -120,13 +120,25 @@ spec:
             - sync
             - --config
             - /etc/lightningstream/lightningstream.yaml
+            # Lightning Stream requires a unique instance name, which is part of
+            # every snapshot filename. It must also be *stable*: a name derived
+            # from the pod name changes on every restart, so each rollout would
+            # register a new instance whose final snapshot lingers until
+            # storage.cleanup.remove_old_instances_interval elapses. The
+            # Deployment is pinned to a single replica (Recreate + RWO PVC), so
+            # the namespace uniquely and stably identifies this instance.
+            # If replicas ever exceed 1, this must become per-pod again.
             - --instance
-            - $(POD_NAME)
+            - pdns-auth-$(POD_NAMESPACE)
           env:
-            - name: POD_NAME
+            - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
-                  fieldPath: metadata.name
+                  fieldPath: metadata.namespace
+          ports:
+            - name: ls-metrics
+              containerPort: 8500
+              protocol: TCP
           volumeMounts:
             - name: lightningstream-config
               mountPath: /etc/lightningstream
@@ -136,10 +148,14 @@ spec:
           resources:
             requests:
               cpu: 10m
-              memory: 32Mi
+              memory: 64Mi
             limits:
               cpu: 100m
-              memory: 128Mi
+              # Half the LMDB map size (1000 MB -> 500Mi): Lightning Stream
+              # buffers snapshots in memory while merging. Keep in step with
+              # the derived limit in the KRO RGD (checked by
+              # hack/validate-lmdb-config.sh).
+              memory: 500Mi
           securityContext:
             runAsUser: 953
             runAsGroup: 953
@@ -149,7 +165,26 @@ spec:
             capabilities:
               drop:
                 - ALL
-          # livenessProbe / readinessProbe: not applicable — sidecar exposes no health endpoint
+          # Probes deliberately test the HTTP listener only, not /healthz.
+          # /healthz turns unhealthy after a sustained storage outage; gating
+          # readiness on it would pull a still-serving authoritative server out
+          # of the Service and turn degraded replication into a DNS outage.
+          # Replication health is alerted on via /metrics instead
+          # (see docs/OPERATIONS.md).
+          livenessProbe:
+            tcpSocket:
+              port: ls-metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: ls-metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
 
       volumes:
         - name: config

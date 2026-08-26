@@ -1,8 +1,8 @@
 # Observability
 
 The bundle exposes native Prometheus metrics from the PowerDNS Recursor,
-PowerDNS Authoritative Server, and PowerDNS Operator. No monitoring backend is
-installed by the bundle.
+PowerDNS Authoritative Server, PowerDNS Operator, and the Lightning Stream
+replication sidecar. No monitoring backend is installed by the bundle.
 
 ## Scrape targets
 
@@ -11,6 +11,7 @@ installed by the bundle.
 | Recursor | `pdns-recursor` | `8082` (`metrics`) | `/metrics` | `pdns_recursor_*` |
 | Authoritative Server | `pdns-auth` | `8081` (`api`) | `/metrics` | `pdns_auth_*` |
 | Operator | `pdns-operator-metrics` | `8080` (`metrics`) | `/metrics` | `controller_runtime_*`, `workqueue_*`, `rest_client_*`, `process_*`, `go_*` |
+| Lightning Stream (sidecar) | `pdns-auth` | `8500` (`ls-metrics`) | `/metrics` | `lightningstream_*` |
 
 The Services are `ClusterIP` resources. Metrics are reachable only from
 networks that can access the cluster Service network unless operators
@@ -21,7 +22,18 @@ addition to `/metrics`. Production deployments should restrict access with
 NetworkPolicies and component ACLs rather than exposing
 these ports outside the monitoring path.
 
-All three Services carry these annotations:
+The Lightning Stream sidecar additionally serves `/healthz` (aggregated sync
+health; `200` healthy, `503` after a sustained storage failure) and a `/storage`
+status page listing the snapshots currently visible in the backend. Its HTTP
+listener is disabled by default upstream and is enabled here via `http.address`
+in the `lightningstream-config` ConfigMap.
+
+Scraping this endpoint is strongly recommended: the sidecar fails quietly, so a
+stalled replication — a full Auth PVC, an unreachable Garage cluster, or invalid
+S3 credentials — is otherwise undetectable until zone data has already diverged
+between instances.
+
+The three PowerDNS Services carry these annotations:
 
 ```yaml
 prometheus.io/scrape: "true"
@@ -31,12 +43,17 @@ prometheus.io/port: "<component port>"
 
 Prometheus installations using annotation-based Kubernetes service discovery
 can therefore scrape the default deployment and KRO-created instances without
-installing additional CRDs.
+installing additional CRDs. Because a Service carries only one
+`prometheus.io/port` annotation, the `pdns-auth` annotations point at the
+PowerDNS API port; the Lightning Stream port is scraped through the
+`ServiceMonitor` below, or by adding an explicit annotation-based target for
+port `8500`.
 
 ## Prometheus Operator
 
 Clusters with the Prometheus Operator CRDs can deploy the base stack and three
-`ServiceMonitor` resources with:
+`ServiceMonitor` resources (the `pdns-authoritative` monitor scrapes both the
+PowerDNS API port and the Lightning Stream sidecar) with:
 
 ```bash
 kubectl apply -k deploy/overlays/monitoring

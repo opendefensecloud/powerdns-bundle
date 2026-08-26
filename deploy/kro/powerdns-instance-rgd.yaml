@@ -318,6 +318,18 @@ spec:
             lmdb_poll_interval: 1s
             storage_poll_interval: 1s
 
+            # Snapshot buffers are held per LMDB (two here), and decompressed
+            # snapshots are 3-10x the compressed size. Bounding the decompressed
+            # buffers keeps the sidecar's peak memory proportional to the limit
+            # derived from lmdbMapSizeMB in deploymentAuth.
+            memory_downloaded_snapshots: 2
+            memory_decompressed_snapshots: 1
+
+            # Prometheus metrics, /healthz and status page; disabled upstream
+            # unless an address is set.
+            http:
+              address: ":8500"
+
     # Multi-instance: Lightning Stream syncs snapshots via Garage S3 so that
     # multiple pdns-auth replicas share a consistent LMDB view.
     # The generated Garage deployment bootstraps its validation layout, S3 key,
@@ -355,13 +367,19 @@ spec:
                 endpoint_url: http://garage.${schema.spec.namespace}.svc.cluster.local:3900
                 bucket: pdns-lmdb
                 region: garage
-                # Lightning Stream 0.6.0 has no *_filename options; credentials
-                # are injected via env vars (see lightningstream container in
-                # deploymentAuth) and substituted by os.ExpandEnv when the
-                # config is loaded. Bare $VAR (no braces) is intentional: KRO
-                # parses any dollar-brace sequence anywhere in the string
-                # (including YAML comments) as a CEL expression and would
-                # reject the RGD. os.ExpandEnv accepts $VAR without braces.
+                # Credentials are injected via env vars (see the lightningstream
+                # container in deploymentAuth) and substituted by os.ExpandEnv
+                # when the config is loaded. Bare $VAR (no braces) is
+                # intentional: KRO parses any dollar-brace sequence anywhere in
+                # the string (including YAML comments) as a CEL expression and
+                # would reject the RGD. os.ExpandEnv accepts $VAR without braces.
+                # Note: simpleblob v1.0.0 (vendored by Lightning Stream 1.0.3)
+                # does support access_key_file / secret_key_file together with
+                # secrets_refresh_interval. That variant keeps credentials out
+                # of the container environment and picks up rotated keys without
+                # a restart, but requires mounting the
+                # pdns-replication-credentials Secret as a volume and reads the
+                # files verbatim (a trailing newline breaks authentication).
                 access_key: $LIGHTNINGSTREAM_S3_ACCESS_KEY
                 secret_key: $LIGHTNINGSTREAM_S3_SECRET_KEY
                 init_timeout: 120s
@@ -375,6 +393,18 @@ spec:
 
             lmdb_poll_interval: 1s
             storage_poll_interval: 1s
+
+            # Snapshot buffers are held per LMDB (two here), and decompressed
+            # snapshots are 3-10x the compressed size. Bounding the decompressed
+            # buffers keeps the sidecar's peak memory proportional to the limit
+            # derived from lmdbMapSizeMB in deploymentAuth.
+            memory_downloaded_snapshots: 2
+            memory_decompressed_snapshots: 1
+
+            # Prometheus metrics, /healthz and status page; disabled upstream
+            # unless an address is set.
+            http:
+              address: ":8500"
 
     - id: configmapRecursorConfig
       template:
@@ -838,6 +868,11 @@ spec:
               port: 8081
               targetPort: api
               protocol: TCP
+            # Lightning Stream sync metrics (/metrics) and health (/healthz).
+            - name: ls-metrics
+              port: 8500
+              targetPort: ls-metrics
+              protocol: TCP
 
     - id: deploymentAuth
       template:
@@ -864,7 +899,7 @@ spec:
               annotations:
                 # The map value forces a Recreate rollout when it changes; the
                 # revision prefix forces one when the shared config contract changes.
-                powerdns.cav.enablers.ob/lmdb-config-revision: "cleanup-v1-map-${string(schema.spec.lmdbMapSizeMB)}"
+                powerdns.cav.enablers.ob/lmdb-config-revision: "ls-v2-map-${string(schema.spec.lmdbMapSizeMB)}"
             spec:
               automountServiceAccountToken: false
               securityContext:
@@ -965,13 +1000,19 @@ spec:
                     - sync
                     - --config
                     - /etc/lightningstream/lightningstream.yaml
+                    # Must be unique *and* stable: a pod-name-derived instance
+                    # registers a new Lightning Stream identity on every
+                    # rollout, orphaning its predecessor's final snapshot until
+                    # remove_old_instances_interval elapses. Each instance owns
+                    # a namespace and runs a single replica (Recreate + RWO
+                    # PVC), so the namespace is a safe stable identity.
                     - --instance
-                    - $(POD_NAME)
+                    - pdns-auth-$(POD_NAMESPACE)
                   env:
-                    - name: POD_NAME
+                    - name: POD_NAMESPACE
                       valueFrom:
                         fieldRef:
-                          fieldPath: metadata.name
+                          fieldPath: metadata.namespace
                     # S3 credentials for the lightningstream config; referenced
                     # via ${LIGHTNINGSTREAM_S3_*} in lightningstream.yaml and
                     # expanded at config-load time. Unused in fs-storage mode
@@ -986,6 +1027,10 @@ spec:
                         secretKeyRef:
                           name: ${secretReplicationCredentials.metadata.name}
                           key: s3-secret-key
+                  ports:
+                    - name: ls-metrics
+                      containerPort: 8500
+                      protocol: TCP
                   volumeMounts:
                     - name: lightningstream-config
                       mountPath: /etc/lightningstream
@@ -995,10 +1040,15 @@ spec:
                   resources:
                     requests:
                       cpu: 10m
-                      memory: 32Mi
+                      memory: 64Mi
                     limits:
                       cpu: 100m
-                      memory: 128Mi
+                      # Lightning Stream buffers snapshots in memory while
+                      # merging, so its ceiling has to scale with the LMDB it
+                      # syncs. Half the map size (default 1000 MB -> 500Mi)
+                      # keeps a tunable lmdbMapSizeMB from silently producing
+                      # an OOMKilled sidecar and a stalled replication.
+                      memory: "${string(schema.spec.lmdbMapSizeMB / 2)}Mi"
                   securityContext:
                     runAsUser: 953
                     runAsGroup: 953
@@ -1008,7 +1058,24 @@ spec:
                     capabilities:
                       drop:
                         - ALL
-                  # livenessProbe / readinessProbe: not applicable — sidecar exposes no health endpoint
+                  # Probes check the HTTP listener, not /healthz: /healthz goes
+                  # unhealthy on sustained storage outages, and gating readiness
+                  # on it would turn degraded replication into a DNS outage.
+                  # Replication health is alerted on via /metrics instead.
+                  livenessProbe:
+                    tcpSocket:
+                      port: ls-metrics
+                    initialDelaySeconds: 10
+                    periodSeconds: 30
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+                  readinessProbe:
+                    tcpSocket:
+                      port: ls-metrics
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
 
               volumes:
                 - name: config
