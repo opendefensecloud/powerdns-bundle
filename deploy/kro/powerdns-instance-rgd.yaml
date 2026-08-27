@@ -53,6 +53,12 @@ spec:
       namespace: string | default="dns"
       pdnsApiKey: string | required=true
       multiInstance: boolean | default=false
+      # Single source of truth for the LMDB map size shared by the Auth
+      # process (lmdb-map-size) and the Lightning Stream sidecar (map_size).
+      # The Auth PVC and Garage layout capacity are derived at 4 MiB per map
+      # MB: 2x for the main and shard environments plus 2x operational
+      # headroom for snapshots and filesystem/storage overhead.
+      lmdbMapSizeMB: integer | default=1000 minimum=256
 
   # ---------------------------------------------------------------------------
   # Resources — ordered by KRO via implicit CEL-expression dependencies
@@ -256,15 +262,22 @@ spec:
             # previous mapasync sync mode and requires a single shard in this mode.
             lmdb-lightning-stream=yes
             lmdb-shards=1
-            # Match Lightning Stream's LMDB map_size so both processes can open the same environment.
-            lmdb-map-size=1000
+            # Match Lightning Stream's LMDB map_size (MB) so both processes can open the same environment.
+            lmdb-map-size=${string(schema.spec.lmdbMapSizeMB)}
 
             api=yes
+            # Development default is `changeme` (see the bundled examples).
+            # Supply a strong key via spec.pdnsApiKey — it is injected here and
+            # into the Operator Secret from the same field, so the two halves
+            # can never drift apart. Generate one with: openssl rand -hex 32
             api-key=${schema.spec.pdnsApiKey}
 
             webserver=yes
             webserver-address=0.0.0.0
             webserver-port=8081
+            # Broad application-level ACL; effective reachability of port 8081 is
+            # constrained by NetworkPolicy and the ClusterIP Service.
+            # See docs/OPERATIONS.md §6.4 to tighten it.
             webserver-allow-from=0.0.0.0/0,::/0
 
             socket-dir=/run/pdns-auth
@@ -287,23 +300,42 @@ spec:
                 options:
                   no_subdir: true
                   create: true
-                  map_size: 1000MB
+                  map_size: ${string(schema.spec.lmdbMapSizeMB)}MB
                 schema_tracks_changes: true
               shard:
                 path: /var/lib/powerdns/pdns.lmdb-0
                 options:
                   no_subdir: true
                   create: true
-                  map_size: 1000MB
+                  map_size: ${string(schema.spec.lmdbMapSizeMB)}MB
                 schema_tracks_changes: true
 
             storage:
               type: fs
               options:
                 root_path: /var/lib/powerdns/snapshots
+              # Disabled by default upstream; explicit cleanup prevents
+              # snapshots from growing without bound on the Auth PVC.
+              cleanup:
+                enabled: true
+                interval: 5m
+                must_keep_interval: 10m
+                remove_old_instances_interval: 168h
 
             lmdb_poll_interval: 1s
             storage_poll_interval: 1s
+
+            # Snapshot buffers are held per LMDB (two here), and decompressed
+            # snapshots are 3-10x the compressed size. Bounding the decompressed
+            # buffers keeps the sidecar's peak memory proportional to the limit
+            # derived from lmdbMapSizeMB in deploymentAuth.
+            memory_downloaded_snapshots: 2
+            memory_decompressed_snapshots: 1
+
+            # Prometheus metrics, /healthz and status page; disabled upstream
+            # unless an address is set.
+            http:
+              address: ":8500"
 
     # Multi-instance: Lightning Stream syncs snapshots via Garage S3 so that
     # multiple pdns-auth replicas share a consistent LMDB view.
@@ -326,14 +358,14 @@ spec:
                 options:
                   no_subdir: true
                   create: true
-                  map_size: 1000MB
+                  map_size: ${string(schema.spec.lmdbMapSizeMB)}MB
                 schema_tracks_changes: true
               shard:
                 path: /var/lib/powerdns/pdns.lmdb-0
                 options:
                   no_subdir: true
                   create: true
-                  map_size: 1000MB
+                  map_size: ${string(schema.spec.lmdbMapSizeMB)}MB
                 schema_tracks_changes: true
 
             storage:
@@ -342,19 +374,44 @@ spec:
                 endpoint_url: http://garage.${schema.spec.namespace}.svc.cluster.local:3900
                 bucket: pdns-lmdb
                 region: garage
-                # Lightning Stream 0.6.0 has no *_filename options; credentials
-                # are injected via env vars (see lightningstream container in
-                # deploymentAuth) and substituted by os.ExpandEnv when the
-                # config is loaded. Bare $VAR (no braces) is intentional: KRO
-                # parses any dollar-brace sequence anywhere in the string
-                # (including YAML comments) as a CEL expression and would
-                # reject the RGD. os.ExpandEnv accepts $VAR without braces.
+                # Credentials are injected via env vars (see the lightningstream
+                # container in deploymentAuth) and substituted by os.ExpandEnv
+                # when the config is loaded. Bare $VAR (no braces) is
+                # intentional: KRO parses any dollar-brace sequence anywhere in
+                # the string (including YAML comments) as a CEL expression and
+                # would reject the RGD. os.ExpandEnv accepts $VAR without braces.
+                # Note: simpleblob v1.0.0 (vendored by Lightning Stream 1.0.3)
+                # does support access_key_file / secret_key_file together with
+                # secrets_refresh_interval. That variant keeps credentials out
+                # of the container environment and picks up rotated keys without
+                # a restart, but requires mounting the
+                # pdns-replication-credentials Secret as a volume and reads the
+                # files verbatim (a trailing newline breaks authentication).
                 access_key: $LIGHTNINGSTREAM_S3_ACCESS_KEY
                 secret_key: $LIGHTNINGSTREAM_S3_SECRET_KEY
                 init_timeout: 120s
+              # Keep enough history for slow peers without allowing the
+              # single-node Garage store to grow indefinitely.
+              cleanup:
+                enabled: true
+                interval: 5m
+                must_keep_interval: 10m
+                remove_old_instances_interval: 168h
 
             lmdb_poll_interval: 1s
             storage_poll_interval: 1s
+
+            # Snapshot buffers are held per LMDB (two here), and decompressed
+            # snapshots are 3-10x the compressed size. Bounding the decompressed
+            # buffers keeps the sidecar's peak memory proportional to the limit
+            # derived from lmdbMapSizeMB in deploymentAuth.
+            memory_downloaded_snapshots: 2
+            memory_decompressed_snapshots: 1
+
+            # Prometheus metrics, /healthz and status page; disabled upstream
+            # unless an address is set.
+            http:
+              address: ":8500"
 
     - id: configmapRecursorConfig
       template:
@@ -368,6 +425,11 @@ spec:
             local-address=0.0.0.0
             local-port=53
 
+            # Broad application-level ACL — this does NOT by itself limit queries
+            # to cluster-internal sources. The effective boundary is the
+            # ClusterIP Service (and, in the single-instance base, a
+            # NetworkPolicy allowing port 53 from dnsdist only). Narrow this to
+            # the pod/client CIDRs via an overlay — see docs/OPERATIONS.md §6.4.
             allow-from=0.0.0.0/0,::/0
 
             # Upstream resolvers for external (non-local) domains
@@ -382,6 +444,8 @@ spec:
             webserver=yes
             webserver-address=0.0.0.0
             webserver-port=8082
+            # Broad application-level ACL; the metrics port is reachable only
+            # via the ClusterIP Service. See docs/OPERATIONS.md §6.4.
             webserver-allow-from=0.0.0.0/0,::/0
 
             socket-dir=/run/pdns-recursor
@@ -453,7 +517,10 @@ spec:
             - ReadWriteOnce
           resources:
             requests:
-              storage: 1Gi
+              # Four MiB per map-size MB covers both LMDB environments plus
+              # equivalent headroom. The default 1000 MB map provisions
+              # 4000Mi; increasing lmdbMapSizeMB expands the claim in lockstep.
+              storage: "${string(schema.spec.lmdbMapSizeMB * 4)}Mi"
 
     # =========================================================================
     # Layer 5 — Garage S3 store (multi-instance only)
@@ -614,7 +681,7 @@ spec:
                 # Bootstrap sidecar.
                 #
                 # Drives the garage admin API at 127.0.0.1:3903 to:
-                #   1. assign a single-node layout (zone=default, capacity=1GB)
+                #   1. assign a single-node layout sized from lmdbMapSizeMB
                 #   2. import the deterministic Lightning Stream S3 key
                 #   3. create the pdns-lmdb bucket
                 #   4. grant the key read+write+owner on that bucket
@@ -634,6 +701,7 @@ spec:
                       ACCESS_KEY="$(cat /etc/garage-credentials/s3-access-key)"
                       SECRET_KEY="$(cat /etc/garage-credentials/s3-secret-key)"
                       API="http://127.0.0.1:3903"
+                      DESIRED_CAPACITY=${string(schema.spec.lmdbMapSizeMB * 4000000)}
                       AUTH="Authorization: Bearer $ADMIN_TOKEN"
 
                       log() { echo "[bootstrap] $*"; }
@@ -658,23 +726,32 @@ spec:
                       esac
                       log "node id $node_id, current layout version $layout_version"
 
-                      if [ "$layout_version" -eq 0 ]; then
-                        log "staging single-node layout (zone=default, capacity=1GB)"
+                      layout="$(curl -fsS -H "$AUTH" "$API/v1/layout")"
+                      current_capacity="$(printf '%s' "$layout" | jq -r \
+                        --arg id "$node_id" '.roles[]? | select(.id == $id) | .capacity // empty')"
+
+                      if [ "$current_capacity" != "$DESIRED_CAPACITY" ]; then
+                        next_layout_version=$((layout_version + 1))
+                        log "staging single-node layout (zone=default, capacity=$DESIRED_CAPACITY bytes)"
                         body="$(jq -nc --arg id "$node_id" \
-                          '[{id:$id,zone:"default",capacity:1000000000,tags:[]}]')"
+                          '[{id:$id,zone:"default",capacity:${string(schema.spec.lmdbMapSizeMB * 4000000)},tags:[]}]')"
                         curl -fsS -X POST -H "$AUTH" -H 'Content-Type: application/json' \
                           -d "$body" "$API/v1/layout" >/dev/null
-                        log "applying layout version 1"
+                        log "applying layout version $next_layout_version"
                         curl -fsS -X POST -H "$AUTH" -H 'Content-Type: application/json' \
-                          -d '{"version":1}' "$API/v1/layout/apply" >/dev/null
+                          -d "{\"version\":$next_layout_version}" "$API/v1/layout/apply" >/dev/null
                         log "waiting for layout to take effect"
                         for _ in $(seq 1 30); do
                           new_v="$(curl -fsS -H "$AUTH" "$API/v1/status" | jq '.layoutVersion')"
-                          [ "$new_v" = "1" ] && break
+                          [ "$new_v" = "$next_layout_version" ] && break
                           sleep 1
                         done
+                        if [ "$new_v" != "$next_layout_version" ]; then
+                          log "ERROR: Garage layout remained at version $new_v"
+                          exit 1
+                        fi
                       else
-                        log "layout already at version $layout_version; skipping"
+                        log "layout capacity already $current_capacity bytes; skipping"
                       fi
 
                       key_code="$(curl -s -o /dev/null -w '%{http_code}' \
@@ -782,7 +859,7 @@ spec:
           name: pdns-auth
           namespace: ${targetNamespace.metadata.name}
           labels:
-            app.kubernetes.io/name: dns-authoritative
+            app.kubernetes.io/name: pdns-auth
             app.kubernetes.io/component: dns-authoritative
           annotations:
             prometheus.io/scrape: "true"
@@ -804,6 +881,11 @@ spec:
             - name: api
               port: 8081
               targetPort: api
+              protocol: TCP
+            # Lightning Stream sync metrics (/metrics) and health (/healthz).
+            - name: ls-metrics
+              port: 8500
+              targetPort: ls-metrics
               protocol: TCP
 
     - id: deploymentAuth
@@ -828,6 +910,10 @@ spec:
               labels:
                 app.kubernetes.io/name: pdns-auth
                 app.kubernetes.io/component: dns-auth
+              annotations:
+                # The map value forces a Recreate rollout when it changes; the
+                # revision prefix forces one when the shared config contract changes.
+                powerdns.cav.enablers.ob/lmdb-config-revision: "ls-v2-map-${string(schema.spec.lmdbMapSizeMB)}"
             spec:
               automountServiceAccountToken: false
               securityContext:
@@ -837,7 +923,7 @@ spec:
                   type: RuntimeDefault
               initContainers:
                 - name: repair-lmdb-permissions
-                  image: powerdns/lightningstream:1.0.2@sha256:31acb91faadda5ddb5fc03073cd464cecbce7be0f752d70a39ef2ebb0065539f
+                  image: powerdns/lightningstream:1.0.3@sha256:b8698c930fe347e55c307adeb7950d5c249410ec0f7460f96d955a8bf706852d
                   command:
                     - /bin/sh
                     - -c
@@ -923,18 +1009,24 @@ spec:
                     failureThreshold: 3
 
                 - name: lightningstream
-                  image: powerdns/lightningstream:1.0.2@sha256:31acb91faadda5ddb5fc03073cd464cecbce7be0f752d70a39ef2ebb0065539f
+                  image: powerdns/lightningstream:1.0.3@sha256:b8698c930fe347e55c307adeb7950d5c249410ec0f7460f96d955a8bf706852d
                   args:
                     - sync
                     - --config
                     - /etc/lightningstream/lightningstream.yaml
+                    # Must be unique *and* stable: a pod-name-derived instance
+                    # registers a new Lightning Stream identity on every
+                    # rollout, orphaning its predecessor's final snapshot until
+                    # remove_old_instances_interval elapses. Each instance owns
+                    # a namespace and runs a single replica (Recreate + RWO
+                    # PVC), so the namespace is a safe stable identity.
                     - --instance
-                    - $(POD_NAME)
+                    - pdns-auth-$(POD_NAMESPACE)
                   env:
-                    - name: POD_NAME
+                    - name: POD_NAMESPACE
                       valueFrom:
                         fieldRef:
-                          fieldPath: metadata.name
+                          fieldPath: metadata.namespace
                     # S3 credentials for the lightningstream config; referenced
                     # via ${LIGHTNINGSTREAM_S3_*} in lightningstream.yaml and
                     # expanded at config-load time. Unused in fs-storage mode
@@ -949,6 +1041,10 @@ spec:
                         secretKeyRef:
                           name: ${secretReplicationCredentials.metadata.name}
                           key: s3-secret-key
+                  ports:
+                    - name: ls-metrics
+                      containerPort: 8500
+                      protocol: TCP
                   volumeMounts:
                     - name: lightningstream-config
                       mountPath: /etc/lightningstream
@@ -958,10 +1054,15 @@ spec:
                   resources:
                     requests:
                       cpu: 10m
-                      memory: 32Mi
+                      memory: 64Mi
                     limits:
                       cpu: 100m
-                      memory: 128Mi
+                      # Lightning Stream buffers snapshots in memory while
+                      # merging, so its ceiling has to scale with the LMDB it
+                      # syncs. Half the map size (default 1000 MB -> 500Mi)
+                      # keeps a tunable lmdbMapSizeMB from silently producing
+                      # an OOMKilled sidecar and a stalled replication.
+                      memory: "${string(schema.spec.lmdbMapSizeMB / 2)}Mi"
                   securityContext:
                     runAsUser: 953
                     runAsGroup: 953
@@ -971,7 +1072,24 @@ spec:
                     capabilities:
                       drop:
                         - ALL
-                  # livenessProbe / readinessProbe: not applicable — sidecar exposes no health endpoint
+                  # Probes check the HTTP listener, not /healthz: /healthz goes
+                  # unhealthy on sustained storage outages, and gating readiness
+                  # on it would turn degraded replication into a DNS outage.
+                  # Replication health is alerted on via /metrics instead.
+                  livenessProbe:
+                    tcpSocket:
+                      port: ls-metrics
+                    initialDelaySeconds: 10
+                    periodSeconds: 30
+                    timeoutSeconds: 3
+                    failureThreshold: 3
+                  readinessProbe:
+                    tcpSocket:
+                      port: ls-metrics
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                    timeoutSeconds: 3
+                    failureThreshold: 3
 
               volumes:
                 - name: config
@@ -1335,7 +1453,7 @@ spec:
               terminationGracePeriodSeconds: 10
               containers:
                 - name: manager
-                  image: ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7
+                  image: ghcr.io/telekom/powerdns-operator:sha-b6cc86a@sha256:4e84a237f4b30e912c5e5a4cfe615eeaf11f4c102c64e5f46c0867ed6348af6c
                   args:
                     - --leader-elect
                     - --metrics-bind-address=:8080

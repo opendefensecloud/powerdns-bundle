@@ -18,6 +18,7 @@ EXPECTED_RESOURCES=(
   lightningstream
   pdns-operator
   garage
+  garage-bootstrap
   deploy-manifests
   kro-manifests
 )

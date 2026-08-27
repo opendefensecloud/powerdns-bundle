@@ -24,9 +24,13 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: dns-authoritative
+      app.kubernetes.io/name: pdns-auth
   endpoints:
     - port: api
+      path: /metrics
+      interval: 30s
+    # Lightning Stream sidecar: replication lag, snapshot and storage errors.
+    - port: ls-metrics
       path: /metrics
       interval: 30s
 ---

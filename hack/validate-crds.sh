@@ -58,10 +58,10 @@ done
 
 echo
 echo "--- 4. kubectl describe output ---"
-$KUBECTL describe zone    intern.example.com    -n "$NAMESPACE" | grep -q "Kind:"
-check "Zone describe shows Kind field"           true
-$KUBECTL describe rrset   app.intern.example.com -n "$NAMESPACE" | grep -q "Type:"
-check "RRset describe shows Type field"          true
+check "Zone describe shows Kind field" bash -c \
+  "$KUBECTL describe zone intern.example.com -n '$NAMESPACE' | grep -q 'Kind:'"
+check "RRset describe shows Type field" bash -c \
+  "$KUBECTL describe rrset app.intern.example.com -n '$NAMESPACE' | grep -q 'Type:'"
 
 echo
 if [[ "$CLEANUP" == "true" ]]; then

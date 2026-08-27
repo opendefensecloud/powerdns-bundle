@@ -10,9 +10,16 @@
 # The dnsdist / pdns-recursor / pdns-authoritative base-image CVEs previously
 # listed here were cleared on 2026-07-06 by bumping to rebuilt upstream patch
 # images (dnsdist 1.9.16, pdns-recursor 5.2.11, pdns-auth 4.9.16), which all
-# scan clean. The refreshed PowerDNS Operator image also scans clean, leaving
-# only lightningstream findings that require an upstream rebuild suppressed
-# below.
+# scan clean. The PowerDNS Operator image was refreshed again on 2026-08-24
+# (rebuild against the current golang:1.26 patch release) and scans clean.
+# Lightning Stream was bumped to 1.0.3 the same day, which cleared its Go
+# stdlib findings but the base image still carries the x/crypto findings
+# below plus a handful of new findings (golang.org/x/net, util-linux) with
+# no upstream-rebuilt tag available yet; all are suppressed below pending a
+# future Lightning Stream release. On 2026-08-26 a new OpenSSL finding
+# (CVE-2026-14456) surfaced on the same 1.0.3 digest (Debian trixie fix
+# 3.5.7-1~deb13u2 not yet baked into any published lightningstream tag)
+# and was added below.
 #
 # Review/renewal date: 2026-09-05
 vulnerabilities:
@@ -61,4 +68,36 @@ vulnerabilities:
     # HIGH in golang.org/x/crypto (lightningstream)
     statement: >-
       golang.org/x/crypto/ssh CVE compiled into the lightningstream binary; lightningstream replicates via S3/HTTPS, not SSH, so the vulnerable SSH code paths are not exercised. Fixed by the next upstream rebuild.
+    expired-at: 2026-09-05
+  # --- lightningstream 1.0.3: new findings introduced by the 2026-08-24 base-image bump ---
+  - id: CVE-2026-46600
+    # HIGH in golang.org/x/net (lightningstream)
+    statement: >-
+      golang.org/x/net/dns/dnsmessage out-of-bounds read when parsing a malformed SVCB/HTTPS DNS resource record, causing a panic/crash (DoS). Lightning Stream does not parse arbitrary DNS responses as a client; it only replicates PowerDNS LMDB state over S3/HTTPS. No upstream lightningstream rebuild with x/net 0.56.0+ is available yet.
+    expired-at: 2026-09-05
+  - id: CVE-2026-53612
+    # HIGH in util-linux/mount (lightningstream base image)
+    statement: >-
+      Local TOCTOU race in mount(8) allowing a co-resident unprivileged user to redirect ownership/permission changes via /etc/fstab `user`/`X-mount.*` options. The lightningstream container runs a single non-interactive replication process with no other local users and no /etc/fstab-driven mounts. No patched Debian trixie package is published yet.
+    expired-at: 2026-09-05
+  - id: CVE-2026-53613
+    # HIGH in util-linux/mount (lightningstream base image)
+    statement: >-
+      Related TOCTOU/SUID bypass in libmount via LIBMOUNT_FORCE_MOUNT2 and legacy mount paths, enabling local privilege escalation. Not exploitable in the lightningstream container, which has no local multi-user access or SUID mount usage. No patched Debian trixie package is published yet.
+    expired-at: 2026-09-05
+  - id: CVE-2026-53614
+    # HIGH in util-linux/mount (lightningstream base image)
+    statement: >-
+      Follow-up TOCTOU variant (fd_target handling) grouped with CVE-2026-53612/53613. Not exploitable in the lightningstream container for the same reasons: no local multi-user access. No patched Debian trixie package is published yet.
+    expired-at: 2026-09-05
+  - id: CVE-2026-53615
+    # HIGH in util-linux/mount (lightningstream base image)
+    statement: >-
+      Follow-up TOCTOU variant grouped with CVE-2026-53612/53613/53614. Not exploitable in the lightningstream container for the same reasons: no local multi-user access. No patched Debian trixie package is published yet.
+    expired-at: 2026-09-05
+  # --- lightningstream 1.0.3: new OpenSSL finding surfaced by CI on 2026-08-26 (no new upstream tag yet) ---
+  - id: CVE-2026-14456
+    # HIGH in openssl/libssl3t64/openssl-provider-legacy (lightningstream base image)
+    statement: >-
+      OpenSSL denial of service via unbounded memory growth in the QUIC server implementation. Lightning Stream links OpenSSL only as an HTTP/TLS client for S3 replication traffic; it does not run a QUIC server, so the vulnerable server-side code path is never exercised. Fixed in Debian trixie package 3.5.7-1~deb13u2, not yet present in the current powerdns/lightningstream:1.0.3 image (still 3.5.6-1~deb13u2 as of 2026-08-26); no newer upstream lightningstream tag has been published.
     expired-at: 2026-09-05

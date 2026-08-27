@@ -143,18 +143,18 @@ kubectl -n dns get configmap pdns-auth-config -o yaml      # lmdb-map-size
 kubectl -n dns get configmap lightningstream-config -o yaml # map_size / options.map_size
 ```
 
-Both must show the same numeric value (default: `1000` MB).
+Both must show the same numeric value (default: `1000` MB). For KRO-managed instances, this value comes from the `lmdbMapSizeMB` field on the `PowerDNSInstance` spec — both ConfigMaps, the Auth PVC request, and the Garage layout capacity are derived from it. For statically-managed `deploy/base/` manifests, `hack/validate-lmdb-config.sh` cross-checks the two ConfigMaps in CI on every change.
 
 **PVC full:**
 
-Monitor the PVC usage. LMDB files and Lightning Stream snapshots share the same `1Gi` volume. Expand if needed:
+Monitor the PVC usage. In the static deployment, LMDB files and Lightning Stream snapshots share the same `4Gi` volume. KRO requests `lmdbMapSizeMB × 4Mi` (`4000Mi` by default). Both follow the same policy: 2× for the `main` and `shard` LMDB environments plus 2× snapshot/filesystem headroom.
 
 ```bash
 kubectl -n dns exec deployment/pdns-auth -c lightningstream -- \
   du -sh /var/lib/powerdns /var/lib/powerdns/snapshots
 ```
 
-To increase: patch `spec.resources.requests.storage` on the PVC and raise `lmdb-map-size` / `map_size` in both ConfigMaps proportionally.
+For static manifests, raise both ConfigMap values and the PVC request while preserving the 4× policy. For KRO instances, change only `spec.lmdbMapSizeMB`; KRO expands the PVC automatically. Existing PVC expansion requires the claim's StorageClass to set `allowVolumeExpansion: true` (see `UPGRADE.md` §2.2).
 
 ### 2.4 Pod restart and recovery
 
@@ -214,7 +214,7 @@ kubectl -n dns edit configmap lightningstream-config    # options.map_size
 kubectl -n dns rollout restart deployment/pdns-auth
 ```
 
-Both values must always be identical.
+Both values must always be identical. For KRO-managed instances, increase `spec.lmdbMapSizeMB` on the `PowerDNSInstance` CR instead — it is the single source of truth and automatically requests four times that value in MiB for the PVC. For static deployments, raise `pdns-auth-data` to four times the map size as well. Decreasing the map size is unsupported because the PVC cannot be shrunk and the existing LMDB data may exceed the new ceiling.
 
 ---
 
@@ -222,7 +222,7 @@ Both values must always be identical.
 
 ### 4.1 Single-instance backup
 
-In single-instance mode, Lightning Stream writes LMDB snapshots to `/var/lib/powerdns/snapshots` on the Auth pod's PVC (`type: fs`). These snapshots provide a fast restart path but are co-located with the LMDB files on the same `1 Gi` volume.
+In single-instance mode, Lightning Stream writes LMDB snapshots to `/var/lib/powerdns/snapshots` on the Auth pod's PVC (`type: fs`). These snapshots provide a fast restart path but are co-located with the LMDB files on the same Auth volume (`4Gi` in the static deployment, `4000Mi` at the default KRO map size).
 
 **Primary backup mechanism: Kubernetes CRs**
 
@@ -249,14 +249,36 @@ kubectl -n dns get pvc pdns-auth-data  # confirm PVC name
 
 ### 4.3 Monitoring snapshot accumulation
 
-Snapshots accumulate over time. Monitor available space:
+Lightning Stream cleanup is explicitly enabled for filesystem and S3 storage. It runs every `5m`, keeps snapshots for at least `10m`, and removes stale instance histories after `168h`. Monitor available space to detect unusual write volume or failed cleanup:
 
 ```bash
 kubectl -n dns exec deployment/pdns-auth -c lightningstream -- \
   du -sh /var/lib/powerdns/snapshots
 ```
 
-For multi-instance Garage storage, snapshot retention is controlled by Lightning Stream's `storage_gc_interval` and `storage_gc_generations` upstream defaults.
+Do not remove the explicit `storage.cleanup` block: cleanup is disabled by default in Lightning Stream 1.0.3.
+
+### 4.4 Monitoring replication health
+
+The Lightning Stream sidecar serves Prometheus metrics, a `/healthz` endpoint and a status page on port `8500` (`ls-metrics`). This is the primary signal that replication is working — the sidecar fails *quietly*, so a stalled sync (full PVC, unreachable Garage, invalid credentials) is otherwise invisible until zone data diverges.
+
+```bash
+# Expose the sidecar endpoints locally (no in-container tooling required)
+kubectl -n dns port-forward deployment/pdns-auth 8500:8500
+
+# Prometheus metrics (also scraped automatically by the packaged ServiceMonitor)
+curl -s http://localhost:8500/metrics
+
+# Aggregated health: 200 = healthy, 503 = sustained storage failure
+curl -so /dev/null -w '%{http_code}\n' http://localhost:8500/healthz
+
+# Snapshots currently visible in the storage backend
+open http://localhost:8500/storage
+```
+
+The container probes intentionally test only that the listener is up. `/healthz` reports `503` after roughly five minutes of failing storage operations; wiring readiness to it would evict a still-serving Authoritative Server from its Service and turn degraded replication into a DNS outage. Alert on `/healthz` and on the storage error metrics instead of failing the pod.
+
+If the sidecar is `OOMKilled`, raise `lmdbMapSizeMB` headroom rather than the limit alone — the limit is derived from it (`lmdbMapSizeMB / 2` MiB). For static deployments, raise the `lightningstream` container memory limit and the PVC together, preserving the documented ratios.
 
 ---
 
@@ -335,6 +357,12 @@ The following measures are applied in the current release:
 - **Metrics restricted to ClusterIP:** Prometheus metrics endpoints are not exposed via LoadBalancer.
 - **Network policies:** The workload namespace ships a default-deny (ingress and egress) baseline with per-component allow-lists, so each pod can reach only the peers it needs. On clusters whose CNI does not enforce `NetworkPolicy` these objects are inert and harmless.
 
+Broad-looking application-level ACLs in the component configs
+(`allow-from=0.0.0.0/0`, `webserver-allow-from=0.0.0.0/0`) are deliberate: the
+effective reachability boundary is the NetworkPolicy set plus the ClusterIP
+Services, not the daemon ACL. Overlay examples for tightening them are in
+[§6.4](#64-hardening-overlay-examples).
+
 #### Network policy model
 
 The manifests live in `deploy/base/network-policies/` and are applied by default with the bundle. Each pod starts denied in both directions; the per-component policies then re-open exactly the required flows:
@@ -394,13 +422,13 @@ The following items are known residual risks, accepted exceptions, or operating 
 
 | # | Item | Scope | Mitigation / required action |
 |---|---|---|---|
-| 1 | The single-instance base ships the Authoritative API key as a placeholder (`api-key=changeme`). | Single-instance base | Override the key via an overlay or Kubernetes Secret before exposing the cluster. Access to the API port is already constrained to the operator and a monitoring namespace by network policy. |
-| 2 | The Authoritative (`8081`) and Recursor (`8082`) webservers use `webserver-allow-from=0.0.0.0/0`. | Base | Access is constrained at the network layer by the NetworkPolicies. For defense-in-depth, tighten `webserver-allow-from` to the pod CIDR via an overlay. |
+| 1 | The single-instance base ships the Authoritative API key as a placeholder (`api-key=changeme`). | Single-instance base | Override the key via an overlay or Kubernetes Secret before exposing the cluster (`openssl rand -hex 32`); the Auth ConfigMap and the Operator Secret must carry the identical value. Access to the API port is already constrained to the operator and a monitoring namespace by network policy. See the [production preflight checklist](INSTALLATION.md#7-production-preflight-checklist). |
+| 2 | The Authoritative (`8081`) and Recursor (`8082`) webservers use `webserver-allow-from=0.0.0.0/0`. | Base | Access is constrained at the network layer by the NetworkPolicies. For defense-in-depth, tighten `webserver-allow-from` to the pod CIDR via an overlay — see [§6.4](#64-hardening-overlay-examples). |
 | 3 | The image CVE scan gate is blocking, but a set of fix-available `HIGH`/`CRITICAL` findings in upstream base images and third-party modules is suppressed via a time-boxed allowlist. | CI/CD | Each entry in `.trivyignore.yaml` carries a justification and an `expired-at` date; on expiry the finding re-fails the gate and must be re-triaged. Close items by bumping to a rebuilt upstream image/digest as they become available. See the allowlist renewal runbook in [CI-CD.md](CI-CD.md#handling-cve-findings-and-renewing-the-allowlist). |
 | 4 | NetworkPolicies are inert on a CNI that does not enforce them. | All | The deployment assumes the target CNI enforces `NetworkPolicy` (for example the AWS VPC CNI with network-policy enforcement enabled). Verify enforcement on the target cluster. |
-| 5 | Per-client DNS rate limiting is disabled by default. | All | Under the default `externalTrafficPolicy: Cluster` the LoadBalancer source-NATs client IPs. Preserve the client IP and then enable `DNSDIST_MAX_QPS_PER_CLIENT` (see §6.1). |
-| 6 | The Recursor is allowed egress to `0.0.0.0/0` on port `53`. | Base | The upstream forwarders are configurable, so the egress is broad-by-port. Narrow it to the specific resolver addresses via an overlay for a stricter posture. |
-| 7 | The Operator is allowed egress to `0.0.0.0/0` on ports `443`/`6443`. | Base | The kube-apiserver endpoint is not a selectable pod and varies by platform, so the grant is restricted by port only. |
+| 5 | Per-client DNS rate limiting is disabled by default. | All | Under the default `externalTrafficPolicy: Cluster` the LoadBalancer source-NATs client IPs. Preserve the client IP and then enable `DNSDIST_MAX_QPS_PER_CLIENT` (see §6.1); a worked example is in [§6.4](#64-hardening-overlay-examples). |
+| 6 | The Recursor is allowed egress to `0.0.0.0/0` on port `53`. | Base | The upstream forwarders are configurable, so the egress is broad-by-port. Narrow it to the specific resolver addresses via an overlay — see [§6.4](#64-hardening-overlay-examples). |
+| 7 | The Operator is allowed egress to `0.0.0.0/0` on ports `443`/`6443`. | Base | The kube-apiserver endpoint is not a selectable pod and varies by platform, so the grant is restricted by port only. Where the endpoint is stable it can be pinned via an overlay — see [§6.4](#64-hardening-overlay-examples). |
 | 8 | The application namespace enforces the Pod Security **Baseline** profile, not **Restricted**. | All | Two workloads require Baseline (items 9 and 10). All other workloads already satisfy Restricted and are warned/audited against it. |
 | 9 | The Authoritative `repair-lmdb-permissions` initContainer runs as root. | Authoritative | It only chowns the LMDB volume; it drops all capabilities except `CHOWN` and sets `allowPrivilegeEscalation: false`. Required because the PVC is provisioned root-owned. |
 | 10 | The Garage S3 store and its bootstrap sidecar run as root. | Multi-instance only | Garage ships as a `scratch` image; this exception is isolated to the multi-instance replication topology and does not apply to the single-instance base. |
@@ -408,3 +436,184 @@ The following items are known residual risks, accepted exceptions, or operating 
 | 12 | No formal certification or full STIG/CIS compliance is claimed. | All | The scope is baseline hardening per the agreed requirements; formal certification is out of scope unless separately agreed. |
 
 For the security architecture overview, see [ARCHITECTURE.md §8.2](ARCHITECTURE.md#82-security-and-hardening).
+
+### 6.4 Hardening overlay examples
+
+The base manifests deliberately ship permissive-but-network-constrained defaults
+so the bundle deploys unchanged on any conformant cluster. The snippets below
+close the residual risks from §6.3 for environments where the concrete
+addresses, CIDRs, and load-balancer behaviour are known.
+
+They are reference patches, not a shipped overlay: the correct values are
+environment-specific, and a wrong CIDR here turns into a DNS outage. Copy them
+into your own Kustomize overlay, substitute the placeholders, and verify with
+`kustomize build <your-overlay>` before applying.
+
+> **Multi-instance note:** these patches apply to the static base
+> (`deploy/base/`). The KRO topology renders its configuration from
+> `deploy/kro/powerdns-instance-rgd.yaml`, so the equivalent change there is an
+> edit to the RGD templates rather than a Kustomize patch.
+
+Skeleton overlay:
+
+```yaml
+# overlays/hardened/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../deploy
+patches:
+  - path: dnsdist-service.yaml
+  - path: recursor-egress.yaml
+```
+
+#### Restrict the DNS LoadBalancer to known clients (§6.3 item 5)
+
+Closes the "open resolver" exposure. Combine with `externalTrafficPolicy: Local`
+to preserve client IPs, which is the precondition for per-client rate limiting.
+
+```yaml
+# overlays/hardened/dnsdist-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dnsdist
+  namespace: dns
+spec:
+  # Preserves the real client source IP. Requires that your load balancer and
+  # node pool support it; nodes without a dnsdist pod stop answering health
+  # checks, so keep the Deployment spread across nodes.
+  externalTrafficPolicy: Local
+  # Only these sources may reach port 53. Replace with your client CIDRs.
+  loadBalancerSourceRanges:
+    - 10.0.0.0/8
+    - 192.168.0.0/16
+```
+
+With client IPs preserved, enable the per-client limit on the dnsdist container:
+
+```yaml
+# overlays/hardened/dnsdist-qps.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dnsdist
+  namespace: dns
+spec:
+  template:
+    spec:
+      containers:
+        - name: dnsdist
+          env:
+            # Per-client-IP ceiling. Only meaningful once client IPs are real.
+            - name: DNSDIST_MAX_QPS_PER_CLIENT
+              value: "50"
+            # Aggregate ceiling; size to Recursor/Auth capacity.
+            - name: DNSDIST_MAX_QPS
+              value: "5000"
+```
+
+#### Narrow Recursor upstream egress (§6.3 item 6)
+
+The base allows recursor egress to `0.0.0.0/0` on port `53` because the
+forwarders are configurable. Once the resolvers are fixed, pin them. Set the
+forwarder addresses in the Recursor config **and** the policy together —
+narrowing only the policy silently breaks resolution.
+
+```yaml
+# overlays/hardened/recursor-egress.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: recursor
+  namespace: dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pdns-recursor
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            # Replace with your internal forwarder addresses (/32 each).
+            cidr: 10.10.0.53/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+```
+
+This is a full replacement of the egress rules for that policy, so re-declare
+the flows the recursor still needs (Authoritative `53` and cluster DNS) — see
+the shipped `deploy/base/network-policies/recursor.yaml` for the complete set.
+
+#### Pin the kube-apiserver egress for the Operator (§6.3 item 7)
+
+The base grants the Operator egress to `0.0.0.0/0` on `443`/`6443` because the
+API server endpoint varies by platform. On a cluster with a stable endpoint,
+resolve it once (`kubectl get endpoints kubernetes -n default`) and pin it:
+
+```yaml
+# overlays/hardened/operator-egress.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: operator
+  namespace: dns
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pdns-operator
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 172.20.0.1/32   # replace with the API server endpoint
+      ports:
+        - protocol: TCP
+          port: 443
+```
+
+On managed control planes the endpoint can change during upgrades or scaling
+events. Verify it is stable before pinning, otherwise the Operator loses its
+watch connection and stops reconciling.
+
+#### Tighten the webserver ACLs (§6.3 item 2)
+
+Defense-in-depth for the Authoritative (`8081`) and Recursor (`8082`)
+webservers, which currently accept `0.0.0.0/0` at the application layer and rely
+on NetworkPolicy for the real boundary. Replace the ACL with your pod CIDR:
+
+```yaml
+# overlays/hardened/kustomization.yaml (excerpt)
+patches:
+  - target:
+      kind: ConfigMap
+      name: pdns-auth-config
+    patch: |-
+      - op: replace
+        path: /data/pdns.conf
+        value: |
+          ...unchanged settings...
+          webserver-allow-from=10.244.0.0/16
+```
+
+Because both ConfigMaps hold their settings in a single multi-line key, a JSON
+patch has to restate the whole file. Maintaining a full replacement ConfigMap in
+the overlay (with `behavior: replace`) is usually less error-prone. Keep the
+value wide enough to include the operator pod and the Prometheus scraper, and
+remember that the Authoritative pod's ACL must still admit the Operator, or all
+zone reconciliation fails with a connection error.
+
+#### Verification
+
+After applying any of the above, re-run the network policy suite against the
+cluster to confirm the intended flows still work and the denied ones stay
+denied:
+
+```bash
+./hack/validate-network-policies.sh
+```

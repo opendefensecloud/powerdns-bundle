@@ -8,4 +8,9 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 1Gi
+      # Sized for ~2x the 1000MB LMDB map size (the main and shard LMDB
+      # environments in configmap-lightningstream.yaml are each capped at
+      # that size) plus headroom for Lightning Stream snapshots and
+      # filesystem overhead. Raise proportionally if lmdb-map-size /
+      # map_size increase (see docs/OPERATIONS.md §3.4).
+      storage: 4Gi

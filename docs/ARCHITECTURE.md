@@ -225,7 +225,7 @@ At container startup, the Recursor entrypoint replaces `__PDNS_AUTH_SERVICE_HOST
 | **AFO reference** | AFO-005 |
 
 For the decision rationale and evaluated alternatives, see [ADR-002](ADR-002-LMDB-DATA-STORE.md).
-PowerDNS Authoritative and the Lightning Stream sidecar run with the same UID/GID and the same 1000 MB LMDB map size so both processes can safely open the shared LMDB environment.
+PowerDNS Authoritative and the Lightning Stream sidecar run with the same UID/GID and the same 1000 MB LMDB map size so both processes can safely open the shared LMDB environment. For KRO-managed instances, this value is a single schema field (`lmdbMapSizeMB`, see §5.1); for the static base manifests it is cross-checked automatically by `hack/validate-lmdb-config.sh` in CI.
 
 ### 3.5 Lightning Stream — Replication
 
@@ -234,6 +234,8 @@ PowerDNS Authoritative and the Lightning Stream sidecar run with the same UID/GI
 | **Function** | Synchronizes LMDB databases between Auth instances via S3 snapshots. Multi-writer, eventual consistency. |
 | **OSS project** | [PowerDNS/lightningstream](https://github.com/PowerDNS/lightningstream) |
 | **Deployment** | Sidecar container alongside each Auth pod |
+| **Instance name** | `pdns-auth-<namespace>` — must be unique *and* stable (see [§6](#6-replication-and-backup-lightning-stream--s3)). |
+| **Ports** | `:8500` — Prometheus `/metrics`, `/healthz`, and a `/storage` snapshot status page. |
 | **AFO reference** | AFO-006 |
 
 For details on the sync mechanism, see [Section 6](#6-replication-and-backup-lightning-stream--s3).
@@ -391,7 +393,7 @@ relevant to operating and tuning the data store:
 | `lmdb-filename` | `/var/lib/powerdns/pdns.lmdb` | Path to the LMDB environment file on the persistent volume. |
 | `lmdb-lightning-stream` | `yes` | Enables the on-disk layout required by the Lightning Stream sidecar. PowerDNS 4.9 removed the previous `mapasync` sync mode. |
 | `lmdb-shards` | `1` | Single shard is mandatory when `lmdb-lightning-stream=yes`. |
-| `lmdb-map-size` | `1000` (MB) | Maximum size of the LMDB environment. **Must match** the Lightning Stream `map_size` (see below) so both processes can open the same environment. |
+| `lmdb-map-size` | `1000` (MB) | Maximum size of the LMDB environment. **Must match** the Lightning Stream `map_size` (see below) so both processes can open the same environment. In KRO-managed instances this is driven by the single `lmdbMapSizeMB` schema field (`PowerDNSInstance`, default `1000`); in the static base manifests it is a plain value cross-checked against `configmap-lightningstream.yaml` by `hack/validate-lmdb-config.sh` (run in CI). |
 
 The Lightning Stream sidecar
 (`deploy/base/authoritative/configmap-lightningstream.yaml`) opens the same two
@@ -405,19 +407,24 @@ LMDB files and must use an identical map size:
 | `options.no_subdir` | `true` | LMDB stored as a single file, not a directory. |
 | `schema_tracks_changes` | `true` | Lets Lightning Stream detect changes via the LMDB schema. |
 | `lmdb_poll_interval` | `1s` | How often the sidecar polls the LMDB for changes. |
+| `memory_downloaded_snapshots` | `2` | Compressed snapshot buffers held in memory **per LMDB**. Two slots let one slow download proceed without stalling the other peers. |
+| `memory_decompressed_snapshots` | `1` | Decompressed snapshot buffers **per LMDB**. Decompressed snapshots are 3–10× the compressed size, so the upstream default of `3` dominates the sidecar's memory profile; one buffer per LMDB bounds it. |
+| `http.address` | `:8500` | Enables `/metrics`, `/healthz` and the status page. Disabled upstream unless set. |
 
 > **Important:** `lmdb-map-size` (Auth) and `map_size` (Lightning Stream) must
 > always be changed together. A mismatch prevents one of the two processes from
-> opening the shared environment.
+> opening the shared environment. `hack/validate-lmdb-config.sh` enforces this
+> for the static base manifests, and rejects any stray hardcoded value in the
+> KRO `ResourceGraphDefinition` that bypasses the `lmdbMapSizeMB` schema field.
 
 ### 5.2 Storage, permissions, and recovery
 
 | Aspect | Configuration |
 |---|---|
-| **Persistent volume** | `PersistentVolumeClaim` `pdns-auth-data`, `1Gi`, `ReadWriteOnce` (`deploy/base/authoritative/pvc.yaml`). Resize by increasing `resources.requests.storage`; raise `lmdb-map-size`/`map_size` accordingly if zone data grows beyond ~1000 MB. |
+| **Persistent volume** | `PersistentVolumeClaim` `pdns-auth-data`, `4Gi`, `ReadWriteOnce` in the static base (`deploy/base/authoritative/pvc.yaml`). This applies a 4× sizing policy: 2× for the `main` and `shard` LMDB environments plus 2× snapshot/filesystem headroom. KRO derives the request as `lmdbMapSizeMB × 4Mi` (default `4000Mi`) so map and storage capacity cannot drift. Existing-claim expansion requires a StorageClass with `allowVolumeExpansion: true`. |
 | **Mount path** | `/var/lib/powerdns` — holds the LMDB files and the Lightning Stream snapshot directory (`/var/lib/powerdns/snapshots`, single-instance `type: fs`). |
 | **File ownership** | The pod runs with `fsGroup: 953`. A `repair-lmdb-permissions` init container runs `chown -R 953:953 /var/lib/powerdns` so the read-only-root-filesystem Auth and sidecar containers can write to the volume. |
-| **Restart behaviour** | The Auth Deployment uses the `Recreate` strategy because the `ReadWriteOnce` PVC cannot be mounted by two pods at once (see [§8.3](#83-rolling-updates)). On restart, the new pod re-opens the existing LMDB file from the PVC — no data import is required. |
+| **Restart behaviour** | The Auth Deployment uses the `Recreate` strategy because the `ReadWriteOnce` PVC cannot be mounted by two pods at once (see [§8.3](#83-rolling-updates)). Its pod template carries an LMDB config revision; changing `lmdbMapSizeMB` in KRO or shipping a new shared config revision triggers a restart so both processes load the same settings. The new pod re-opens the existing LMDB file from the PVC — no data import is required. |
 | **Recovery** | After a pod loss, zone data is restored directly from the LMDB file on the retained PVC. In multi-instance mode, a freshly provisioned instance also rebuilds its LMDB from Lightning Stream snapshots in the S3 store (see [§6](#6-replication-and-backup-lightning-stream--s3)). |
 
 Persistence, recovery, and resource consumption of this configuration are
@@ -507,12 +514,14 @@ Scenario A and C are exercised automatically by `hack/validate-replication.sh` (
 
 | Aspect | Value / Guidance |
 |---|---|
-| **Snapshot retention (`type: fs`)** | Snapshots accumulate indefinitely on the PVC. The default PVC size is 1 Gi; the snapshot directory and LMDB files share that space. Monitor with `kubectl exec … -c lightningstream -- du -sh /var/lib/powerdns/snapshots`. |
-| **Snapshot retention (`type: s3`)** | Controlled by lightningstream's `storage_gc_interval` and `storage_gc_generations` settings (not currently set explicitly; upstream defaults apply). Garage storage grows proportionally to write throughput × retention window. |
+| **Snapshot retention (`type: fs`)** | Explicit cleanup runs every `5m`, retains every snapshot for at least `10m`, and removes stale instance histories after `168h`. This prevents unbounded growth on the shared Auth PVC while leaving a download window for slow consumers. Continue monitoring with `kubectl exec … -c lightningstream -- du -sh /var/lib/powerdns/snapshots`. |
+| **Snapshot retention (`type: s3`)** | Uses the same explicit `storage.cleanup` policy (`5m` / `10m` / `168h`) in Garage. Cleanup is disabled by default in Lightning Stream 1.0.3, so these settings must remain explicit. |
 | **Tombsweeper** | Deleted DNS records are stored as tombstones to ensure convergence across replicas. The tombsweeper removes them after `tombstone_lifetime` (upstream default: 7 days). Do not manually compact or truncate the LMDB — removing tombstones before all replicas have seen them causes deleted records to reappear. |
 | **Sync latency** | End-to-end propagation is governed by `lmdb_poll_interval` (how often lightningstream polls for LMDB changes) and `storage_poll_interval` (how often it checks the S3 bucket for new snapshots from peers). Both default to `1s`; reducing below `1s` increases CPU load without meaningful latency benefit. |
-| **LMDB map size** | `lmdb-map-size` (Auth `pdns.conf`) and `map_size` (lightningstream config) must always be identical — a mismatch prevents one of the two processes from opening the shared environment. Current default: 1000 MB. Raise both together if `du -sh /var/lib/powerdns/pdns.lmdb` approaches the limit. |
-| **Garage layout capacity** | The bootstrap sidecar claims 1 GB of capacity for the single-node layout. If the `pdns-lmdb` bucket approaches this limit, increase the capacity claim in the bootstrap script and apply the new layout via `garage layout apply`. |
+| **LMDB map size** | `lmdb-map-size` (Auth `pdns.conf`) and `map_size` (lightningstream config) must always be identical — a mismatch prevents one of the two processes from opening the shared environment. Current default: 1000 MB (`lmdbMapSizeMB` schema field for KRO instances). KRO automatically requests four times that value in MiB for the Auth PVC; static deployments must preserve the same 4× policy when changing the two ConfigMaps and PVC. |
+| **Sidecar memory** | Lightning Stream buffers snapshots in memory while merging, and does so *per LMDB* — this bundle configures two (`main` + `shard`). The sidecar's memory limit is therefore derived from the map size (`lmdbMapSizeMB / 2` MiB, i.e. `500Mi` at the default) rather than fixed, so raising `lmdbMapSizeMB` cannot silently produce an OOMKilled sidecar and a stalled replication. Static deployments must preserve the same ratio. |
+| **Instance identity** | The sidecar is started with `--instance pdns-auth-$(POD_NAMESPACE)`. Lightning Stream requires the instance name to be unique, and this bundle additionally requires it to be *stable*: a pod-name-derived name registers a new instance on every rollout, and each retired instance's final snapshot is retained until `remove_old_instances_interval` elapses. The Auth Deployment is pinned to a single replica (Recreate + `ReadWriteOnce` PVC), so the namespace is a safe stable identity. If the replica count ever exceeds 1, the name must become per-pod again. |
+| **Garage layout capacity** | KRO derives the single-node Garage layout capacity as `lmdbMapSizeMB × 4,000,000` bytes (4 GB at the default), matching the Auth storage policy. The bootstrap sidecar stages and applies a new layout version when the configured capacity increases. Decreasing `lmdbMapSizeMB` is unsupported because Kubernetes cannot shrink the corresponding PVC. |
 | **Garage single-node limitation** | The current Garage deployment uses `rpc_public_addr: 127.0.0.1:3901`, which confines the cluster to a single pod. Horizontal scaling of Garage is not supported in this configuration. Each `PowerDNSInstance` with `multiInstance: true` gets its own single-node Garage cluster; Garage clusters are not shared across instances. |
 
 ---
@@ -604,22 +613,29 @@ The namespace model keeps Kubernetes objects, credentials, Services, and persist
 Each instance runs its own PowerDNS Operator deployment, configured with a namespace-local `PDNS_API_URL` and the `WATCH_NAMESPACE` environment variable set to the instance namespace. With `WATCH_NAMESPACE` set, the operator's manager cache is restricted to that namespace, so namespaced `Zone` and `RRset` resources from other namespaces are neither watched nor reconciled. As defense in depth, the per-instance operator `ServiceAccount` is granted only a namespaced `Role` for the namespaced CRDs and operational resources (`zones`, `rrsets`, `events`, `leases`); a minimal `ClusterRole` covers the cluster-scoped `ClusterZone` / `ClusterRRset` CRDs that the operator binary always reconciles. End-to-end configuration and runtime isolation is verified by [`hack/validate-multi-instance.sh`](../hack/validate-multi-instance.sh).
 
 The shipping image
-(`ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7`)
+(`ghcr.io/telekom/powerdns-operator:sha-b6cc86a@sha256:4e84a237f4b30e912c5e5a4cfe615eeaf11f4c102c64e5f46c0867ed6348af6c`)
 is built from the public maintained branch
 [`telekom/PowerDNS-Operator:feat/watch-namespace-env`](https://github.com/telekom/PowerDNS-Operator/tree/feat/watch-namespace-env)
 at commit
-[`1a1bf0c`](https://github.com/telekom/PowerDNS-Operator/commit/1a1bf0c19fc86512cc3b13829e298a99c3aa7d93).
-That commit reapplies the `WATCH_NAMESPACE` patch to pinned upstream commit
-[`powerdns-operator/PowerDNS-Operator@255d6b0`](https://github.com/powerdns-operator/PowerDNS-Operator/commit/255d6b01372aa94118d2e875553af783fb5062e4).
-It is not the plain upstream image; searching the upstream `main` branch alone
-for `WATCH_NAMESPACE` therefore finds no matches.
+[`b6cc86a`](https://github.com/telekom/PowerDNS-Operator/commit/b6cc86a).
+That commit is an empty, code-identical rebuild of
+[`1a1bf0c`](https://github.com/telekom/PowerDNS-Operator/commit/1a1bf0c19fc86512cc3b13829e298a99c3aa7d93)
+(the commit that reapplies the `WATCH_NAMESPACE` patch to pinned upstream commit
+[`powerdns-operator/PowerDNS-Operator@255d6b0`](https://github.com/powerdns-operator/PowerDNS-Operator/commit/255d6b01372aa94118d2e875553af783fb5062e4)),
+triggered solely to refresh the `golang:1.26` build base and clear HIGH-severity
+Go stdlib CVEs (CVE-2026-33818, CVE-2026-39821, CVE-2026-46600, CVE-2026-56853,
+CVE-2026-56858, CVE-2026-56859, CVE-2026-56860, CVE-2026-56862) flagged by the
+`odc-powerdns-bundle-dev` CVE scan gate. It is not the plain upstream image;
+searching the upstream `main` branch alone for `WATCH_NAMESPACE` therefore
+finds no matches.
 The public
-[`1a1bf0c` build workflow](https://github.com/telekom/PowerDNS-Operator/actions/runs/31013044539)
+[`b6cc86a` build workflow](https://github.com/telekom/PowerDNS-Operator/actions/runs/32718935477)
 passed generated-code checks, lint, unit tests, PowerDNS 4.9 and 5.0 end-to-end
 tests, image scanning, and multi-architecture publishing.
 The previously deployed source and pre-refresh feature branch remain
 independently verifiable through the
-[`archive/watch-namespace-deployed-b23ee7d`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-deployed-b23ee7d)
+[`archive/watch-namespace-deployed-1a1bf0c`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-deployed-1a1bf0c),
+[`archive/watch-namespace-deployed-b23ee7d`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-deployed-b23ee7d),
 and
 [`archive/watch-namespace-pre-refresh-5c6edda`](https://github.com/telekom/PowerDNS-Operator/tree/archive/watch-namespace-pre-refresh-5c6edda)
 tags. Upstream support is tracked in
@@ -744,7 +760,7 @@ The separation is enforced at the Kubernetes workload level. Each function runs 
 | Process | `pdns_recursor` (caching resolver) | `pdns_server` + LMDB backend |
 | ConfigMap | `pdns-recursor-config` | `pdns-auth-config` |
 | Persistent storage | None (in-memory cache only) | PVC `pdns-auth-data` (LMDB) |
-| Network service | `ClusterIP :53` | `ClusterIP :53`, `:8081` |
+| Network service | `ClusterIP :53` | `ClusterIP :53`, `:8081`, `:8500` (Lightning Stream metrics) |
 | Kubernetes service | `pdns-recursor.dns.svc.cluster.local` | `pdns-auth.dns.svc.cluster.local` |
 | Manifest path | `deploy/base/recursor/` | `deploy/base/authoritative/` |
 
@@ -807,14 +823,14 @@ Liveness and Readiness Probes are configured for all Deployments where a health 
 | PowerDNS Recursor | TCPSocket `:53` | TCPSocket `:53` |
 | PowerDNS Authoritative | TCPSocket `:53` | TCPSocket `:8081` (management API port) |
 | PowerDNS Operator | HTTPGet `:8081 /healthz` | HTTPGet `:8081 /readyz` |
-| Lightning Stream (sidecar) | — | — |
+| Lightning Stream (sidecar) | TCPSocket `:8500` | TCPSocket `:8500` |
 
 **Rationale:**
 
 - **dnsdist / Recursor:** A listening TCP port 53 is the minimal reachability check. Both components serve DNS over TCP as well as UDP; an open socket confirms the process is operational.
 - **Authoritative Server:** Liveness checks the DNS listener (`:53`); readiness checks the management API port (`:8081`), ensuring the Operator can reach the API before traffic is routed.
 - **Operator:** Uses the standard controller-runtime health endpoints (`/healthz`, `/readyz`) on the dedicated health port (`:8081`).
-- **Lightning Stream:** No health endpoint is exposed by this sidecar. Kubernetes restarts the container on crash without a probe.
+- **Lightning Stream:** The sidecar serves `/metrics`, `/healthz` and a status page on `:8500` once `http.address` is set (the endpoint is disabled by default upstream). Both probes deliberately use a TCP check on that port rather than `/healthz`: `/healthz` returns `503` after a sustained storage outage, so gating readiness on it would remove a still-serving Authoritative Server from its Service and escalate degraded replication into a DNS outage. Replication health is surfaced through Prometheus instead (see §8.1).
 
 **Timing parameters:**
 

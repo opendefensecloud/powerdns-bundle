@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Validates that the Recursor, Authoritative Server, and Operator metrics
-# endpoints are reachable through their Kubernetes Services and return
-# Prometheus exposition data. Also verifies that the deployed ServiceMonitors
-# are selected and all three targets are healthy in Prometheus.
+# Validates that the Recursor, Authoritative Server, Operator, and Lightning
+# Stream metrics endpoints are reachable through their Kubernetes Services and
+# return Prometheus exposition data. Also verifies that the deployed
+# ServiceMonitors are selected and all four targets are healthy in Prometheus.
 # Usage: NAMESPACE=dns ./hack/validate-observability.sh
 set -euo pipefail
 
@@ -15,6 +15,7 @@ CURL="${CURL_BIN:-curl}"
 METRICS_TIMEOUT="${METRICS_TIMEOUT:-30}"
 REC_LOCAL_PORT="${REC_LOCAL_PORT:-18082}"
 AUTH_LOCAL_PORT="${AUTH_LOCAL_PORT:-18081}"
+LS_LOCAL_PORT="${LS_LOCAL_PORT:-18500}"
 OPERATOR_LOCAL_PORT="${OPERATOR_LOCAL_PORT:-18080}"
 PROMETHEUS_LOCAL_PORT="${PROMETHEUS_LOCAL_PORT:-19090}"
 PROMETHEUS_TIMEOUT="${PROMETHEUS_TIMEOUT:-120}"
@@ -165,9 +166,18 @@ check_prometheus_scrapes() {
       -o "$targets_file" 2>/dev/null; then
       if python3 - "$targets_file" >"$status_file" <<'PY'
 import json
+import re
 import sys
 
-expected = {"pdns-recursor", "pdns-auth", "pdns-operator-metrics"}
+# Keyed by (service, port): the pdns-auth Service exposes two scrape targets
+# (the PowerDNS API and the Lightning Stream sidecar), so keying by service
+# name alone would silently record only whichever target was listed last.
+expected = {
+    ("pdns-recursor", "8082"),
+    ("pdns-auth", "8081"),
+    ("pdns-auth", "8500"),
+    ("pdns-operator-metrics", "8080"),
+}
 with open(sys.argv[1], encoding="utf-8") as stream:
     payload = json.load(stream)
 
@@ -176,13 +186,15 @@ for target in payload.get("data", {}).get("activeTargets", []):
     labels = target.get("labels", {})
     discovered = target.get("discoveredLabels", {})
     service = labels.get("service") or discovered.get("__meta_kubernetes_service_name")
-    if service in expected:
-        found[service] = target.get("health", "unknown")
+    match = re.search(r":(\d+)/", target.get("scrapeUrl", ""))
+    port = match.group(1) if match else ""
+    if (service, port) in expected:
+        found[(service, port)] = target.get("health", "unknown")
 
-for service in sorted(expected):
-    print(f"{service}={found.get(service, 'missing')}")
+for service, port in sorted(expected):
+    print(f"{service}:{port}={found.get((service, port), 'missing')}")
 
-sys.exit(0 if all(found.get(service) == "up" for service in expected) else 1)
+sys.exit(0 if all(found.get(key) == "up" for key in expected) else 1)
 PY
       then
         break
@@ -215,6 +227,8 @@ check_metrics "Recursor" "pdns-recursor" "$REC_LOCAL_PORT" 8082 \
   '^(pdns_recursor_|# TYPE pdns_recursor_)'
 check_metrics "Authoritative Server" "pdns-auth" "$AUTH_LOCAL_PORT" 8081 \
   '^(pdns_auth_|# TYPE pdns_auth_)'
+check_metrics "Lightning Stream" "pdns-auth" "$LS_LOCAL_PORT" 8500 \
+  '^(lightningstream_|# TYPE lightningstream_)'
 check_metrics "Operator" "pdns-operator-metrics" "$OPERATOR_LOCAL_PORT" 8080 \
   '^(controller_runtime_|workqueue_|process_|go_|# TYPE (controller_runtime_|workqueue_|process_|go_))'
 check_prometheus_scrapes

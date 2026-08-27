@@ -7,6 +7,11 @@ data:
   lightningstream.yaml: |
     # Single-instance deployment: filesystem backend on the shared data PVC (ADR-006).
     # For multi-instance, switch storage.type to s3 and add Garage credentials (ADR-003).
+    #
+    # map_size (MB) below must stay numerically identical to `lmdb-map-size`
+    # in configmap.yaml (pdns-auth-config) on both the main and shard
+    # environments — checked by hack/validate-lmdb-config.sh. KRO deployments
+    # derive both from the single lmdbMapSizeMB schema field instead.
     lmdbs:
       main:
         path: /var/lib/powerdns/pdns.lmdb
@@ -27,6 +32,28 @@ data:
       type: fs
       options:
         root_path: /var/lib/powerdns/snapshots
+      # Lightning Stream disables cleanup by default. Keep recent snapshots
+      # long enough for a slow consumer while preventing unbounded PVC growth.
+      cleanup:
+        enabled: true
+        interval: 5m
+        must_keep_interval: 10m
+        remove_old_instances_interval: 168h
 
     lmdb_poll_interval: 1s
     storage_poll_interval: 1s
+
+    # Snapshot buffers are held in memory *per LMDB*, and this config defines
+    # two (main + shard). Decompressed snapshots are 3-10x the compressed size,
+    # so the upstream default of 3 decompressed buffers dominates the sidecar's
+    # memory profile. Keep one decompressed buffer per LMDB and rely on the two
+    # compressed slots to ride out a slow download. The lightningstream
+    # container memory limit is sized against these values.
+    memory_downloaded_snapshots: 2
+    memory_decompressed_snapshots: 1
+
+    # Prometheus metrics (/metrics), health (/healthz) and a status page.
+    # Disabled upstream unless an address is set; without it the sync layer is
+    # invisible and a stalled replication (e.g. a full PVC) goes unnoticed.
+    http:
+      address: ":8500"

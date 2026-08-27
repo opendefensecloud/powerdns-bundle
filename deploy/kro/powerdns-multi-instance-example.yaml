@@ -44,8 +44,11 @@ metadata:
   namespace: default
 spec:
   namespace: dns-a
+  # DEVELOPMENT DEFAULT — replace before exposing this instance.
+  # Each instance must use its own key: openssl rand -hex 32
   pdnsApiKey: changeme-a
   multiInstance: true
+  lmdbMapSizeMB: 1000
 
 ---
 apiVersion: kro.run/v1alpha1
@@ -55,5 +58,8 @@ metadata:
   namespace: default
 spec:
   namespace: dns-b
+  # DEVELOPMENT DEFAULT — replace before exposing this instance.
+  # Each instance must use its own key: openssl rand -hex 32
   pdnsApiKey: changeme-b
   multiInstance: true
+  lmdbMapSizeMB: 1000

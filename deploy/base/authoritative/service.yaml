@@ -4,7 +4,7 @@ metadata:
   name: pdns-auth
   namespace: dns
   labels:
-    app.kubernetes.io/name: dns-authoritative
+    app.kubernetes.io/name: pdns-auth
     app.kubernetes.io/component: dns-authoritative
   annotations:
     prometheus.io/scrape: "true"
@@ -26,4 +26,9 @@ spec:
     - name: api
       port: 8081
       targetPort: api
+      protocol: TCP
+    # Lightning Stream sync metrics (/metrics) and health (/healthz).
+    - name: ls-metrics
+      port: 8500
+      targetPort: ls-metrics
       protocol: TCP

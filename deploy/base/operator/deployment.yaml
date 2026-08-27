@@ -30,7 +30,7 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
         - name: manager
-          image: ghcr.io/telekom/powerdns-operator:sha-1a1bf0c@sha256:4a096359cac381e8cf4ce947770b58a1b1be1fda59a9f82e3038fa9ea7213fd7
+          image: ghcr.io/telekom/powerdns-operator:sha-b6cc86a@sha256:4e84a237f4b30e912c5e5a4cfe615eeaf11f4c102c64e5f46c0867ed6348af6c
           args:
             - --leader-elect
             - --metrics-bind-address=:8080

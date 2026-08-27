@@ -162,6 +162,9 @@ jobs:
       - name: Observability manifest contract
         run: bash hack/validate-observability-manifests.sh
 
+      - name: LMDB map-size configuration contract
+        run: bash hack/validate-lmdb-config.sh
+
       - name: GitHub Actions lint
         run: actionlint -color
 
