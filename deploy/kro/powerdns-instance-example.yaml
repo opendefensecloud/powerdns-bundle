@@ -27,6 +27,8 @@ metadata:
   namespace: default
 spec:
   namespace: dns
+  # DEVELOPMENT DEFAULT — replace before exposing this instance.
+  # Generate a strong key with: openssl rand -hex 32
   pdnsApiKey: changeme
   multiInstance: false
   # 4Mi of PVC capacity is provisioned per MB (4000Mi at this default).

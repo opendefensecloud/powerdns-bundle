@@ -266,11 +266,18 @@ spec:
             lmdb-map-size=${string(schema.spec.lmdbMapSizeMB)}
 
             api=yes
+            # Development default is `changeme` (see the bundled examples).
+            # Supply a strong key via spec.pdnsApiKey — it is injected here and
+            # into the Operator Secret from the same field, so the two halves
+            # can never drift apart. Generate one with: openssl rand -hex 32
             api-key=${schema.spec.pdnsApiKey}
 
             webserver=yes
             webserver-address=0.0.0.0
             webserver-port=8081
+            # Broad application-level ACL; effective reachability of port 8081 is
+            # constrained by NetworkPolicy and the ClusterIP Service.
+            # See docs/OPERATIONS.md §6.4 to tighten it.
             webserver-allow-from=0.0.0.0/0,::/0
 
             socket-dir=/run/pdns-auth
@@ -418,6 +425,11 @@ spec:
             local-address=0.0.0.0
             local-port=53
 
+            # Broad application-level ACL — this does NOT by itself limit queries
+            # to cluster-internal sources. The effective boundary is the
+            # ClusterIP Service (and, in the single-instance base, a
+            # NetworkPolicy allowing port 53 from dnsdist only). Narrow this to
+            # the pod/client CIDRs via an overlay — see docs/OPERATIONS.md §6.4.
             allow-from=0.0.0.0/0,::/0
 
             # Upstream resolvers for external (non-local) domains
@@ -432,6 +444,8 @@ spec:
             webserver=yes
             webserver-address=0.0.0.0
             webserver-port=8082
+            # Broad application-level ACL; the metrics port is reachable only
+            # via the ClusterIP Service. See docs/OPERATIONS.md §6.4.
             webserver-allow-from=0.0.0.0/0,::/0
 
             socket-dir=/run/pdns-recursor

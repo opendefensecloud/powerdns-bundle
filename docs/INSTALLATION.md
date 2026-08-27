@@ -12,7 +12,8 @@ This guide walks through deploying the PowerDNS bundle on a Kubernetes cluster u
 4. [Verify the installation](#4-verify-the-installation)
 5. [Deploy: Multi-instance](#5-deploy-multi-instance)
 6. [Air-gap deployment](#6-air-gap-deployment)
-7. [Next steps](#7-next-steps)
+7. [Production preflight checklist](#7-production-preflight-checklist)
+8. [Next steps](#8-next-steps)
 
 ---
 
@@ -65,7 +66,13 @@ A single instance runs one complete DNS stack (dnsdist + Recursor + Authoritativ
 
 ### 3.1 Create a PowerDNSInstance resource
 
-Replace `changeme` with a strong API key. The key is used internally between the Operator and the Authoritative Server.
+Replace `changeme` with a strong API key — it is a development placeholder used
+by the bundled examples and the CI validation scripts, not a usable secret.
+Generate one with `openssl rand -hex 32`. The key is used internally between the
+Operator and the Authoritative Server; KRO injects it into both the Authoritative
+config and the Operator Secret from this single field, so the two cannot drift
+apart. See the [production preflight checklist](#7-production-preflight-checklist)
+before serving real traffic.
 
 ```yaml
 # powerdns-instance.yaml
@@ -76,7 +83,7 @@ metadata:
   namespace: default
 spec:
   namespace: dns        # target namespace — all DNS components are deployed here
-  pdnsApiKey: changeme  # replace with a strong random key
+  pdnsApiKey: changeme  # DEVELOPMENT PLACEHOLDER — replace: openssl rand -hex 32
   multiInstance: false
   lmdbMapSizeMB: 1000   # default; provisions a 4000Mi Auth PVC automatically
 ```
@@ -169,7 +176,7 @@ metadata:
   namespace: default
 spec:
   namespace: dns-a
-  pdnsApiKey: changeme-a   # replace
+  pdnsApiKey: changeme-a   # DEVELOPMENT PLACEHOLDER — replace; use a distinct key per instance
   multiInstance: true
   lmdbMapSizeMB: 1000
 
@@ -182,7 +189,7 @@ metadata:
   namespace: default
 spec:
   namespace: dns-b
-  pdnsApiKey: changeme-b   # replace
+  pdnsApiKey: changeme-b   # DEVELOPMENT PLACEHOLDER — replace; use a distinct key per instance
   multiInstance: true
   lmdbMapSizeMB: 1000
 ```
@@ -230,7 +237,30 @@ Air-gap installation requires all container images to be present in a private re
 
 ---
 
-## 7 Next steps
+## 7 Production preflight checklist
+
+The bundled defaults are tuned for a reproducible reference deployment, not for
+an exposed production environment. Work through this list before serving real
+traffic. Each item links to the section that explains it in full.
+
+| # | Check | Why | Reference |
+|---|---|---|---|
+| 1 | **Replace the API key.** Set `spec.pdnsApiKey` to a generated value (`openssl rand -hex 32`). Never keep `changeme` / `changeme-a` / `changeme-b`. | The key authenticates the Operator against the Authoritative HTTP API. It is a well-known placeholder in the examples and CI scripts. | [§3.1](#31-create-a-powerdnsinstance-resource), [OPERATIONS.md §6.3 item 1](OPERATIONS.md#63-residual-risks-exceptions-and-assumptions) |
+| 2 | **Store the key outside Git.** Source it from a secret manager (External Secrets Operator, Vault, SOPS) rather than committing it to the manifest. | The static base ships the key as a plain `Secret` manifest. | [OPERATIONS.md §6.2](OPERATIONS.md#62-security-review-summary) |
+| 3 | **Verify the CNI enforces `NetworkPolicy`.** Apply a deny test, or run `hack/validate-network-policies.sh` against the target cluster. | The whole network segmentation model is inert on a non-enforcing CNI, and the broad application-level ACLs then become the real boundary. | [OPERATIONS.md §6.1](OPERATIONS.md#61-current-hardening-baseline) |
+| 4 | **Set your own upstream forwarders.** Replace `forward-zones-recurse=.=1.1.1.1;8.8.8.8` with the internal resolvers, or remove the line for full root recursion. | The defaults are public resolvers and leak query metadata outside the organisation. | `deploy/base/recursor/configmap.yaml` |
+| 5 | **Restrict the DNS LoadBalancer.** Set `loadBalancerSourceRanges` on the dnsdist Service unless the resolver is intentionally public. | The Service is created without source restrictions; an open resolver is an amplification risk. | [OPERATIONS.md §6.4](OPERATIONS.md#64-hardening-overlay-examples) |
+| 6 | **Decide on per-client rate limiting.** If client IPs are preserved (`externalTrafficPolicy: Local` or an IP-preserving LB), set `DNSDIST_MAX_QPS_PER_CLIENT`; otherwise size the global `DNSDIST_MAX_QPS` to the backend capacity. | Per-client limiting is disabled by default because the default `Cluster` policy source-NATs all clients to one address. | [OPERATIONS.md §6.1](OPERATIONS.md#61-current-hardening-baseline) |
+| 7 | **Size `lmdbMapSizeMB` for the expected zone volume.** The PVC (4Mi per MB) and the Garage layout are derived from it. Confirm the StorageClass sets `allowVolumeExpansion: true`. | Map size and PVC can be increased later but never shrunk; expansion requires StorageClass support. | [§3.1](#31-create-a-powerdnsinstance-resource), [OPERATIONS.md §3.4](OPERATIONS.md#34-lmdb-map-size-tuning) |
+| 8 | **Label the monitoring namespace** with `network-policy/monitoring: "true"`. | Metrics ingress is granted by namespace label only; without it every scrape is denied by NetworkPolicy. | [OPERATIONS.md §6.1](OPERATIONS.md#61-current-hardening-baseline), [OBSERVABILITY.md](OBSERVABILITY.md) |
+| 9 | **Confirm alerting on replication health.** Alert on the Lightning Stream `/healthz` endpoint and storage error metrics on port `8500`. | The sidecar fails quietly; a stalled sync is invisible until zone data diverges. | [OPERATIONS.md §4.4](OPERATIONS.md#44-monitoring-replication-health) |
+| 10 | **Acknowledge the Authoritative availability ceiling.** The Authoritative Server runs a single replica with a `ReadWriteOnce` PVC and a `Recreate` update strategy, so it is briefly unavailable during updates and node failures. Recursor and dnsdist absorb this for cached queries only. | This is a design property of the single-instance topology, not a defect. Plan maintenance windows or use the multi-instance topology. | [OPERATIONS.md §5.2](OPERATIONS.md#52-dns-availability-during-updates), [ARCHITECTURE.md](ARCHITECTURE.md) |
+| 11 | **Take a backup path decision.** Confirm the StorageClass supports `VolumeSnapshot`, or rely on `Zone`/`RRset` CRs as the source of truth with a GitOps backup of those CRs. | PVC loss is recoverable from the CRs, but only if the CRs themselves are backed up. | [OPERATIONS.md §4](OPERATIONS.md#4-backup--recovery) |
+| 12 | **Review the residual risk register** and record which exceptions are accepted for your environment. | Several broad-by-design grants (recursor egress, operator API-server egress, Pod Security Baseline) are documented exceptions that need an explicit owner decision. | [OPERATIONS.md §6.3](OPERATIONS.md#63-residual-risks-exceptions-and-assumptions) |
+
+---
+
+## 8 Next steps
 
 | Topic | Document |
 |---|---|

@@ -9,7 +9,12 @@ data:
     local-address=0.0.0.0
     local-port=53
 
-    # Allow queries from all cluster-internal sources
+    # Broad application-level ACL — this does NOT limit queries to
+    # cluster-internal sources by itself. The effective boundary is the
+    # NetworkPolicy in deploy/base/network-policies/recursor.yaml (ingress on
+    # port 53 from dnsdist only) plus the ClusterIP Service. Narrow this to the
+    # pod/client CIDRs via an overlay for defense-in-depth — see
+    # docs/OPERATIONS.md §6.4.
     allow-from=0.0.0.0/0,::/0
 
     # Upstream resolvers for external (non-local) domains
@@ -27,6 +32,9 @@ data:
     webserver=yes
     webserver-address=0.0.0.0
     webserver-port=8082
+    # Broad application-level ACL; effective reachability of the metrics port is
+    # constrained by NetworkPolicy (a namespace labelled
+    # network-policy/monitoring=true only). See docs/OPERATIONS.md §6.4.
     webserver-allow-from=0.0.0.0/0,::/0
 
     # Control socket directory (required when readOnlyRootFilesystem is set)

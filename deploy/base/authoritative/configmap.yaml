@@ -21,6 +21,13 @@ data:
     # API Configuration
     # Enabling the HTTP API allows the PowerDNS Operator to manage zones and records.
     api=yes
+    # !! DEVELOPMENT DEFAULT — NOT A PRODUCTION VALUE !!
+    # `changeme` is a well-known placeholder shared by the bundled examples and
+    # the CI validation scripts. Override it before exposing this instance.
+    # This value must stay identical to `api-key` in the pdns-operator-api-key
+    # Secret (deploy/base/operator/secret.yaml) — a mismatch makes every
+    # Operator reconciliation fail with HTTP 401. Generate one with:
+    #   openssl rand -hex 32
     # SUGGESTION: Move api-key to a Kubernetes Secret and inject via ENV or volume.
     api-key=changeme
 
@@ -29,7 +36,12 @@ data:
     webserver=yes
     webserver-address=0.0.0.0
     webserver-port=8081
-    # Allow connections from any pod in the cluster; tighten to the pod CIDR in production.
+    # Broad application-level ACL. This is NOT the effective exposure boundary:
+    # reachability of port 8081 is constrained by the NetworkPolicies in
+    # deploy/base/network-policies/ (operator + a namespace labelled
+    # network-policy/monitoring=true only), and the Service is ClusterIP.
+    # Tighten to the pod CIDR via an overlay for defense-in-depth — see
+    # docs/OPERATIONS.md §6.4.
     webserver-allow-from=0.0.0.0/0,::/0
 
     # Runtime directories
